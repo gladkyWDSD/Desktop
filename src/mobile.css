@@ -1,0 +1,35 @@
+@media(max-width:700px){
+  body{font-size:14px;background:#f7f7f4}
+  .rail,.sidebar{display:none}
+  main{display:block;min-height:100dvh}
+  .content{max-width:none;padding:21px 16px 30px}
+  header{display:block;margin-bottom:23px}
+  h1{font-size:26px;line-height:1.15;margin-top:8px}
+  .sub{font-size:12px;line-height:1.55;margin-top:7px}
+  .header-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:9px;margin-top:18px}
+  .header-actions .cmd{margin-left:0;height:44px;justify-content:center;padding:0 8px}
+  .connect-ai{height:44px;justify-content:center;font-size:12px}
+  .metrics{grid-template-columns:1fr 1fr;gap:9px;margin-bottom:27px}
+  .metrics .metric{height:76px;padding:11px;gap:9px}
+  .metrics .metric:last-child{grid-column:1 / -1;height:61px}
+  .metric b{font-size:16px}.metric span{font-size:9px}
+  .section-title{margin-bottom:12px}.section-title h2{font-size:18px}
+  .text-button{font-size:11px}
+  .agent{padding:14px;min-height:82px}.agent p{font-size:10px}.agent-info>div small{font-size:10px}
+  .direct-note{margin-top:14px;padding:13px}.direct-note p{font-size:10px}
+  .empty{min-height:385px;padding:50px 20px}.empty h2{font-size:21px}.empty-button{height:44px;font-size:12px}
+  .overlay{align-items:flex-end}
+  .palette{width:100%;border-radius:18px 18px 0 0;padding:27px 20px 30px}
+  .palette h2{font-size:21px}.provider{min-height:58px}.connect-copy{font-size:12px}
+  .session-modal{width:100vw;height:92dvh;max-height:92dvh;border-radius:19px 19px 0 0;padding:20px 16px 18px}
+  .session-head{padding:0 28px 16px 0}.session-head h2{font-size:18px}
+  .thread{padding:17px 0;gap:12px}.thread-empty{font-size:12px;padding:20px}
+  .bubble{max-width:91%;padding:11px 12px}.bubble p{font-size:12px}
+  .composer{padding-top:12px}.composer input{min-width:0;height:45px;font-size:12px}.composer .send{height:45px;min-width:45px;justify-content:center}
+  .privacy{justify-content:center;text-align:center;line-height:1.45}
+}
+@media(max-width:360px){
+  .content{padding-left:13px;padding-right:13px}
+  .metrics{grid-template-columns:1fr}.metrics .metric:last-child{grid-column:auto}
+  .header-actions{grid-template-columns:1fr}.header-actions .cmd{display:none}
+}
