@@ -31,5 +31,7 @@
 @media(max-width:360px){
   .content{padding-left:13px;padding-right:13px}
   .metrics{grid-template-columns:1fr}.metrics .metric:last-child{grid-column:auto}
-  .header-actions{grid-template-columns:1fr}.header-actions .cmd{display:none}
+  .header-actions{grid-template-columns:44px 1fr}.header-actions .cmd{display:none}
 }
+@media(max-width:700px){.header-actions{grid-template-columns:minmax(0,1fr) 44px minmax(0,1.35fr)}.settings-trigger{height:44px;justify-content:center;padding:0}.settings-trigger span{display:none}}
+@media(max-width:360px){.header-actions{grid-template-columns:44px 1fr}.header-actions .cmd{display:none}}
