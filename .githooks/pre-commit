@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The version in Cargo.toml and Cargo.lock changes only for a release, when the
+# user asks for one (AGENTS.md, "Releases"): a release commit edits both files
+# together. This hook does not change any version. It refuses a commit in which
+# the two disagree, because `cargo build --locked` fails on that.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+git cat-file -e :Cargo.toml 2>/dev/null || exit 0
+git cat-file -e :Cargo.lock 2>/dev/null || exit 0
+
+manifest="$(git show :Cargo.toml | sed -n '/^\[package\]/,/^\[/s/^version = "\([0-9.]*\)"$/\1/p' | head -n 1)"
+lock="$(git show :Cargo.lock | sed -n '/^name = "desktop-workspace"$/{n;s/^version = "\([0-9.]*\)"$/\1/p;}' | head -n 1)"
+
+if [[ -n "$manifest" && -n "$lock" && "$manifest" != "$lock" ]]; then
+    {
+        echo "Cargo.toml says version $manifest but Cargo.lock says $lock."
+        echo "The version changes only in a release commit, and both files change together."
+    } >&2
+    exit 1
+fi

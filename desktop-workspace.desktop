@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Desktop Workspace
+Comment=Local-only standalone AI terminal workspace
+Exec=desktop-workspace start
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Utility;Development;
+StartupNotify=false

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUPER DESKTOP — your AI workspace for Omarchy</title>
+<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, in a hidden Omarchy / Hyprland workspace you reach from your other PCs, your Android phone and soon iPhone. Direct and encrypted, with no accounts or servers.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel2: #1a2030;
+    --text: #e6e9f0;
+    --muted: #9aa3b5;
+    --accent: #22d3ee;
+    --accent2: #a78bfa;
+    --border: #262e42;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #16202f 0%, var(--bg) 60%) fixed, var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 20px 80px; }
+  header.hero { text-align: center; padding: 48px 20px 12px; }
+  .bolt { font-size: 64px; }
+  h1 { font-size: 44px; margin: 12px 0 8px; letter-spacing: -1px; }
+  h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .tagline { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0 auto; }
+  .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 12px 26px; border-radius: 999px;
+    text-decoration: none; font-weight: 600; font-size: 16px;
+    border: 1px solid var(--border);
+  }
+  .btn.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #06121a; border: none; }
+  .btn.ghost { color: var(--text); background: var(--panel); }
+  .kbd {
+    display: inline-block; padding: 3px 12px; border-radius: 8px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-bottom-width: 3px; font-family: ui-monospace, monospace; font-size: 15px;
+  }
+  section { margin-top: 56px; }
+  h2 { font-size: 28px; letter-spacing: -0.5px; margin-bottom: 6px; }
+  .sub { color: var(--muted); margin-top: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .harness-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .harness {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 8px 16px 8px 10px; font-size: 14.5px;
+  }
+  .harness img { width: 22px; height: 22px; }
+  /* A card with a lot to show takes two columns, so its neighbours stay short.
+     Dense flow backfills the gap it would leave at three columns. */
+  .grid.dense { grid-auto-flow: dense; }
+  @media (min-width: 500px) { .card.wide { grid-column: span 2; } }
+  .card .harness-row { margin-top: 12px; gap: 6px; }
+  .card .harness { font-size: 13px; padding: 4px 10px; }
+  .card .harness img { width: 16px; height: 16px; }
+  pre {
+    background: #070a10; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; overflow-x: auto; font-size: 14px; line-height: 1.7;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .note {
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: 10px; padding: 14px 18px; margin-top: 16px; font-size: 15px; color: var(--muted);
+  }
+  .note strong { color: var(--text); }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+    font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    background: rgba(34, 211, 238, 0.12); color: var(--accent);
+    border: 1px solid rgba(34, 211, 238, 0.35); vertical-align: middle;
+  }
+  .pill.live { background: rgba(74, 222, 128, 0.12); color: #4ade80; border-color: rgba(74, 222, 128, 0.35); }
+  ol.steps { margin: 18px 0 0; padding-left: 22px; color: var(--muted); }
+  ol.steps li { margin-bottom: 8px; }
+  ol.steps strong { color: var(--text); }
+  footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--accent); }
+  a { color: var(--accent); }
+  button { font: inherit; cursor: pointer; }
+  .demo-controls [hidden] { display: none; }
+  .demo-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 12px; }
+  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
+  section { scroll-margin-top: 24px; }
+  .news-link { display: inline-block; margin-bottom: 12px; text-decoration: none; }
+  .screenshots { margin-top: 24px; }
+  figure { margin: 0; }
+  .screenshot-link { display: block; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #070a10; }
+  .screenshot-link img, .screenshot-link video { display: block; width: 100%; height: auto; }
+  .trailer { margin-top: 32px; }
+  figcaption { padding: 12px 0; color: var(--muted); font-size: 14px; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--accent); padding: 10px 0; }
+  details figure { margin-top: 12px; }
+  #install { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
+  #install h2 { margin-top: 0; }
+  .news { border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: var(--radius); padding: 24px; background: var(--panel); }
+  .news h2 { margin-top: 8px; }
+  .news p:last-child { margin-bottom: 0; }
+  .device-shots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 24px; margin-top: 24px; }
+  .device-shots .wide { grid-column: 1 / -1; }
+  .device-shots .wide img { max-width: 900px; margin: 0 auto; }
+  .device-shots img { display: block; width: 100%; height: auto; }
+  .device-shots figcaption { padding: 4px 0 0; text-align: center; }
+  .device-shots figcaption strong { color: var(--text); }
+  .shots-note { color: var(--muted); font-size: 13px; text-align: center; }
+  @media (max-width: 760px) { .device-shots { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px 48px; }
+    header.hero { padding: 32px 0 8px; }
+    h1 { font-size: 34px; }
+    .tagline { font-size: 17px; }
+    h2 { font-size: 25px; }
+    section { margin-top: 36px; }
+    #install, .news { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="bolt" aria-hidden="true">⚡</div>
+    <h1>SUPER <span class="grad">DESKTOP</span></h1>
+    <p class="tagline">Every AI coding agent on every PC, one shortcut away, and in your pocket. A hidden workspace for Omarchy / Hyprland that links your PCs and phones directly, with no accounts and no servers.</p>
+    <div class="cta">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn ghost" href="#features">Main features</a>
+      <a class="btn ghost" href="https://github.com/gladimdim/super-desktop">GitHub</a>
+    </div>
+    <p><a class="pill news-link" href="#ios">Android app available · iPhone in development →</a></p>
+    <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
+  </header>
+
+  <main>
+  <section class="trailer" aria-labelledby="trailer-heading">
+    <h2 id="trailer-heading">Watch it work</h2>
+    <p class="sub">Forty seconds, recorded on a real desktop: the shortcut, a live agent session, another PC, and your phone.</p>
+    <figure>
+      <div class="screenshot-link">
+        <video controls preload="none" playsinline width="1920" height="1080"
+               poster="video/super-desktop-trailer-poster.webp">
+          <source src="video/super-desktop-trailer.mp4" type="video/mp4">
+          <p>Your browser cannot play this video.
+             <a href="video/super-desktop-trailer.mp4">Download it instead</a>.</p>
+        </video>
+      </div>
+      <figcaption>The overlay slides in over this website, a prompt is typed into a live Claude Code session,
+        another PC's harnesses open from the same top bar, and an unfolded Android phone reaches the same
+        sessions. No narration — it runs silent.</figcaption>
+    </figure>
+  </section>
+
+  <section class="screenshots" aria-labelledby="screenshots-heading">
+    <h2 id="screenshots-heading">A real working desktop</h2>
+    <p class="sub">Chrome stays underneath. One shortcut brings your live AI workspace into view.</p>
+    <figure>
+      <div class="screenshot-link">
+        <picture>
+          <source srcset="screenshots/desktop-toggle-poster.webp" media="(prefers-reduced-motion: reduce)">
+          <img id="workspace-demo" src="screenshots/desktop-toggle.gif" width="1440" height="602" fetchpriority="high" alt="Chrome showing the SUPER DESKTOP website. Pressing SUPER + SHIFT + Q brings live terminal cards into view: access all your harnesses with one button press. Three seconds later the same shortcut hides them again so you can keep working.">
+        </picture>
+      </div>
+      <div class="demo-controls">
+        <button id="demo-toggle" class="btn primary" type="button" aria-controls="workspace-demo" aria-pressed="true" hidden>Pause demo</button>
+        <a href="screenshots/desktop-toggle.gif">Open GIF</a>
+      </div>
+    </figure>
+    <details>
+      <summary>View the desktop screenshots</summary>
+      <figure>
+        <a class="screenshot-link" href="screenshots/live-desktop.webp" aria-label="Open full-size desktop screenshot">
+          <img src="screenshots/live-desktop.webp" width="3440" height="1440" loading="lazy" alt="SUPER DESKTOP overlay above a browser, with several live Codex and Claude Code terminal cards and the agent launcher toolbar.">
+        </a>
+        <figcaption>Several projects, one overlay. The terminals stay alive when the workspace is hidden.</figcaption>
+      </figure>
+
+      <figure>
+        <a class="screenshot-link" href="screenshots/live-terminals.webp" aria-label="Open full-size terminal detail screenshot">
+          <img src="screenshots/live-terminals.webp" width="1715" height="815" loading="lazy" alt="Side-by-side Codex and Claude Code cards showing real development output, agent icons, status badges, and terminal controls.">
+        </a>
+        <figcaption>Codex and Claude Code working side by side, with separate output and controls.</figcaption>
+      </figure>
+    </details>
+  </section>
+
+  <section id="install" aria-labelledby="install-heading">
+    <h2 id="install-heading">Install</h2>
+    <p class="sub">Requires <strong>Omarchy Linux</strong> (Arch Linux with Hyprland). Other distributions and desktops are not supported yet. Run this command in a terminal on your Omarchy machine, as your normal user.</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code></pre>
+    <p>Nothing needs to be set up first. The installer adds the system packages it needs (it asks for your password once), installs Rust with rustup if you don't have it, then downloads, builds and installs SUPER DESKTOP. The first build takes several minutes.</p>
+    <p>Press <span class="kbd">SUPER + SHIFT + Q</span> to open your workspace. To update later, run the same command again.</p>
+    <div class="note"><strong>Using remote sessions?</strong> Install on the second PC too, then pair the two. Install the AI command-line tools you want to use separately.</div>
+    <p class="sub">Full prerequisites and troubleshooting: <a href="https://github.com/gladimdim/super-desktop#readme">installation guide</a>.</p>
+  </section>
+
+  <section id="features">
+    <h2>Main features</h2>
+    <p class="sub">Your agents keep running on every PC. Open them from any other PC or from your phone, directly and privately.</p>
+    <div class="grid dense">
+      <div class="card"><h3>📱 Android + iPhone remote access</h3><p>Open every session from your phone: live terminals, prompts with pictures and files, and completion alerts. Android is available now; the iPhone app is in development.</p></div>
+      <div class="card"><h3>📖 Built for foldables</h3><p>Unfold for two live terminals side by side next to your harness list, with layouts that follow every fold and resize. On Android today, coming to iPhone.</p></div>
+      <div class="card"><h3>🖥️ All your PCs, connected</h3><p>Pair as many PCs as you like. Each one can open any other's workspace, to watch and type into its sessions as if you were there.</p></div>
+      <div class="card"><h3>🔒 No accounts, no servers</h3><p>Your PCs and phones talk directly over your own network or Tailscale, encrypted and pinned to each device. Nothing to sign up for, no cloud in between.</p></div>
+      <div class="card"><h3>⚡ Native and fast</h3><p>Rust, GTK4 and tmux: no Electron, no web views. The workspace is there the moment you press the shortcut, and your agents keep running while it is hidden.</p></div>
+      <div class="card wide"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
+        <div class="harness-row">
+          <span class="harness"><img src="logos/anthropic-white.svg" alt="">Claude Code</span>
+          <span class="harness"><img src="logos/openai-white.svg" alt="">Codex</span>
+          <span class="harness"><img src="logos/opencode-light.svg" alt="">OpenCode</span>
+          <span class="harness"><img src="logos/grok-white.svg" alt="">Grok</span>
+          <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
+          <span class="harness">Pi</span>
+          <span class="harness">Aider</span>
+          <span class="harness">Reasonix</span>
+          <span class="harness">DeepSeek</span>
+          <span class="harness">Hermes</span>
+          <span class="harness">Goose</span>
+          <span class="harness">Qwen Code</span>
+          <span class="harness">Crush</span>
+          <span class="harness">Kimi</span>
+          <span class="harness">Kiro</span>
+          <span class="harness">Cursor Agent</span>
+          <span class="harness"><img src="logos/shell-white.svg" alt="">Shell</span>
+        </div>
+      </div>
+      <div class="card"><h3>🧩 Bring your own harness</h3><p>Any other command-line agent: add it in ⚙ Settings → Harness launchers → <strong>Add a harness</strong>, and it gets the same launcher and live terminal card as the built-in ones.</p></div>
+    </div>
+  </section>
+
+  <section id="remote">
+    <h2>Remote sessions — your other PCs <span class="pill live">live</span></h2>
+    <p class="sub">Connect a second computer and its whole workspace opens inside your overlay. Every window becomes a live terminal, so you can watch and use that machine's sessions without getting up.</p>
+    <div class="grid">
+      <div class="card"><h3>↔ Connect either way</h3><p>Send a one-time connection link to another PC, or accept one from it. A single panel handles both directions, so either machine can be the one you look at.</p></div>
+      <div class="card"><h3>🔐 You approve every PC</h3><p>The same code appears on both screens and access is granted only after you confirm it on the computer being shared. Nothing connects behind your back.</p></div>
+      <div class="card"><h3>🖥️ Their layout, your screen</h3><p>Windows sit exactly where they do on the other computer — same sizes and stacking — laid out neatly to fit your display.</p></div>
+      <div class="card"><h3>⌨ Type as if you were there</h3><p>Click a window and start typing. Your keys, paste and Ctrl+C go straight to the session running on the other machine.</p></div>
+    </div>
+    <h3 style="margin-top:32px">In three steps</h3>
+    <ol class="steps">
+      <li>Share a connection link from one computer to the other.</li>
+      <li>Check that the code matches on both screens and approve.</li>
+      <li>The other PC's workspace opens and stays one click away.</li>
+    </ol>
+    <div class="note">Keep <strong>both</strong> computers up to date for the smoothest experience. Once a PC is paired it is remembered — it stays in your list and never needs pairing again.</div>
+  </section>
+
+  <section id="phone">
+    <h2>Phone linking <span class="pill">optional</span></h2>
+    <p class="sub">Take your AI sessions with you. Pair an Android phone and it reaches your SUPER DESKTOP terminals over your own network, with everything kept private between your devices.</p>
+    <div class="grid">
+      <div class="card"><h3>💻 Sessions in your pocket</h3><p>See your running sessions on your phone and type into them, with the terminal's output and colours kept intact.</p></div>
+      <div class="card"><h3>🔔 Know when it's done</h3><p>Opt into completion alerts for Codex, Claude Code, Pi and OpenCode sessions. Delivery depends on your connection and Android background settings.</p></div>
+      <div class="card"><h3>🖼️ Send pictures and files</h3><p>Attach images and files to a prompt for any harness, or share them to SUPER DESKTOP from any other app.</p></div>
+      <div class="card"><h3>⌨ Remote keys &amp; saved drafts</h3><p>Send Enter, arrows, Tab, paging keys, and Ctrl-C without sending your draft. Unsent text is saved separately for each session.</p></div>
+      <div class="card"><h3>📂 Files &amp; Links</h3><p>Browse referenced images, PDFs, Markdown, and code, or open and copy links from the terminal output.</p></div>
+      <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
+    </div>
+    <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
+  </section>
+
+  <section id="ios" class="news" aria-labelledby="ios-heading">
+    <span class="pill">Companion apps · In development</span>
+    <h2 id="ios-heading">iPhone + Android. Built for foldables.</h2>
+    <p>Both companion apps are in active development: bring your desktop AI sessions to iPhone and Android, with <strong>full foldable support for both platforms</strong> as part of that work.</p>
+    <p class="sub">Android already supports adaptive layouts and two terminal panes on wide screens. The iOS app is being developed toward the same experience: layouts that adapt as you fold, unfold, and resize, with independent terminals and drafts. iOS and its foldable support are in development, not yet released.</p>
+    <p>The Android companion is available today and continues to evolve. Follow development in the <a href="https://github.com/gladimdim/super-desktop">project repository</a>.</p>
+    <div class="device-shots">
+      <figure class="wide">
+        <a href="screenshots/ios-duo-split.png" aria-label="Open full-size DUO split screenshot">
+          <img src="screenshots/ios-duo-split.png" width="1600" height="1175" loading="lazy" alt="The iOS app unfolded on an iPhone Duo in landscape: the harness list on the left and two live OpenAI Codex terminals side by side in DUO mode, one showing a diff and cargo test output, the other streaming build logs.">
+        </a>
+        <figcaption><strong>DUO split.</strong> Unfolded, two harnesses run side by side, each with its own live terminal and draft, next to the harness list.</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/ios-duo-harnesses.png" aria-label="Open full-size harness list screenshot">
+          <img src="screenshots/ios-duo-harnesses.png" width="1600" height="1175" loading="lazy" alt="The iOS app on an unfolded iPhone Duo: Codex usage tiles, a paired machine with seven harnesses, and harness cards with IDLE and RUNNING status beside the SUPER DESKTOP foldable illustration.">
+        </a>
+        <figcaption><strong>Every harness.</strong> Usage, machines and each session's status and last prompt at a glance.</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/ios-duo-terminal.png" aria-label="Open full-size terminal screenshot">
+          <img src="screenshots/ios-duo-terminal.png" width="1600" height="1175" loading="lazy" alt="The iOS app on an unfolded iPhone Duo with the harness list beside an open Codex terminal showing colored diffs, test results and a composer with a Send button.">
+        </a>
+        <figcaption><strong>List and terminal.</strong> Open a card and its terminal fills the other half, ready for your next prompt.</figcaption>
+      </figure>
+    </div>
+    <p class="shots-note">iOS app in development, captured in the iPhone Duo simulator against a test bridge.</p>
+  </section>
+
+  </main>
+
+  <footer>
+    Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
+    Local overlay · remote PC-to-PC sessions · phone linking.<br>
+    <a href="https://github.com/gladimdim/super-desktop#readme">README</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a><br>
+    MIT-style open source — issues and PRs welcome.
+  </footer>
+
+</div>
+<script>
+  const demo = document.getElementById('workspace-demo');
+  const toggle = document.getElementById('demo-toggle');
+  const demoSource = demo.parentElement.querySelector('source');
+  const poster = 'screenshots/desktop-toggle-poster.webp';
+  const animation = 'screenshots/desktop-toggle.gif';
+  function setDemoPlaying(playing) {
+    // The reduced-motion <source> would otherwise override an explicit Play.
+    if (demoSource) demoSource.remove();
+    demo.src = playing ? animation : poster;
+    toggle.textContent = playing ? 'Pause demo' : 'Play demo';
+    toggle.setAttribute('aria-pressed', String(playing));
+  }
+  // Autoplay, except for visitors who prefer reduced motion; they start on the still.
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  toggle.hidden = false;
+  if (reduceMotion) setDemoPlaying(false);
+  toggle.addEventListener('click', () => setDemoPlaying(toggle.getAttribute('aria-pressed') !== 'true'));
+</script>
+</body>
+</html>

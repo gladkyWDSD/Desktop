@@ -1,0 +1,71 @@
+/* Cosmic Desktop — midnight surfaces, orbital violet, soft geometry. */
+window.desktop-workspace-window {
+    background-color: #0d1020;
+    background-image: radial-gradient(ellipse at 20% 10%, #262042, transparent), linear-gradient(135deg, #101526, #0d1020);
+    color: #e8eaf8;
+}
+window.desktop-workspace-window.cosmic-transparent {
+    background-color: rgba(13, 16, 32, 0.24);
+    background-image: none;
+}
+.hud-bar {
+    background: #181c30;
+    color: #e8eaf8;
+    border: 1px solid #37364e;
+    border-radius: 16px;
+    box-shadow: 0 10px 30px rgba(4, 6, 15, 0.28);
+}
+.hud-title { color: #c9bcff; letter-spacing: 2px; font-weight: 800; }
+.hud-button, menubutton.machine-selector > button {
+    color: #e0dff4;
+    background: #25283e;
+    border-radius: 9px;
+}
+.hud-button:hover, menubutton.machine-selector > button:hover {
+    background: #3c345b;
+    color: #ffffff;
+}
+.hud-button-danger { color: #ffadbc; }
+.hud-shortcut { color: #a5a5bc; }
+.cosmic-vertical { padding: 0; }
+.cosmic-vertical .hud-title { font-size: 11px; letter-spacing: 1px; }
+.cosmic-vertical .hud-launchers { padding: 8px 0; }
+.cosmic-vertical .hud-button { min-width: 28px; }
+.hud-bar entry { background: #101526; color: #e8eaf8; border-color: #49405f; }
+.mini-terminal, .sticky-note, .harness-panel {
+    border-radius: 18px;
+    border: 1px solid #49405f;
+    box-shadow: 0 14px 38px rgba(3, 4, 14, 0.35);
+}
+.term-header { background: #24243c; color: #e8eaf8; border-radius: 17px 17px 0 0; }
+.harness-panel { background: #171b2d; color: #e8eaf8; }
+.harness-panel .launcher-section {
+    background: #202439;
+    border: 1px solid #37394f;
+    border-radius: 14px;
+    padding: 12px;
+}
+.harness-panel .settings-entry { background: #22263c; border-radius: 12px; border-color: #37394f; }
+.harness-panel .settings-entry:hover { background: #302c49; }
+.harness-panel label { color: #e0e1f0; }
+.harness-panel .launcher-hint, .harness-panel .launcher-footer { color: #aaaec8; }
+.harness-panel .launcher-section-title { color: #c9bcff; }
+.harness-panel .launcher-btn { background: #30344b; color: #efedff; border-radius: 8px; }
+.harness-panel .launcher-btn-primary, .harness-panel .top-bar-size-active { background: #7460ca; color: #ffffff; }
+.harness-panel dropdown > button { background: #30344b; color: #f1edff; border-radius: 8px; }
+.cosmic-new-conversation > button { background: #7460ca; color: #ffffff; }
+.cosmic-new-conversation > button:hover { background: #8b75e1; }
+.cosmic-conversations > contents {
+    background: #171b2d;
+    color: #e8eaf8;
+    padding: 18px;
+    border: 1px solid #49405f;
+    border-radius: 18px;
+}
+.cosmic-picker-title { font-weight: 800; font-size: 18px; color: #e8eaf8; }
+.cosmic-picker-hint { color: #aaaec8; font-size: 12px; }
+.cosmic-picker-folder { color: #c9bcff; font-family: monospace; font-size: 11px; }
+.cosmic-conversations button { background: #282b43; color: #efedff; border: 1px solid #49405f; border-radius: 9px; }
+.cosmic-conversations button:hover { background: #3c345b; }
+.cosmic-conversations .cosmic-agent-choice { padding: 12px; }
+.cosmic-conversations entry { background: #101526; color: #efedff; border-color: #49405f; border-radius: 9px; }

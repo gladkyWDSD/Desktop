@@ -1,0 +1,722 @@
+//! Authenticated desktop snapshot routes (the event stream is in
+//! `desktop_events.rs`), the typed command route and the live
+//! terminal attach stream. Called only after bridge admission, origin checks
+//! and paired-device authorization. Never reads state.json.
+use super::*;
+use crate::desktop_protocol::{
+    valid_card_id, AttachCommand, AttachEvent, CommandOutcome, CommandRequest,
+    LocalWorkspaceSnapshot, TerminalSize, WorkspaceSnapshot, ATTACH_MAX_SECS,
+    MAX_REMOTE_VIEWERS,
+};
+use crate::terminal_transport::PtyAttachment;
+use std::io;
+use std::os::fd::RawFd;
+use std::time::Instant;
+
+/// Concurrent live terminal attachments across the whole bridge. One device may
+/// hold at most `MAX_REMOTE_VIEWERS` of them, matching the viewer's own budget.
+const MAX_ATTACHMENTS: usize = 16;
+/// One entry per live attachment, holding the owning credential hash.
+static ATTACHMENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Reserve an attachment slot for the authenticated device, on behalf of one
+/// card. The slot is released when the stream ends, for any reason.
+struct AttachmentLease(String);
+impl AttachmentLease {
+    fn acquire(device: &str) -> Option<Self> {
+        let device = device.to_string();
+        let mut live = ATTACHMENTS.lock().ok()?;
+        if live.len() >= MAX_ATTACHMENTS
+            || live.iter().filter(|hash| **hash == device).count() >= MAX_REMOTE_VIEWERS
+        {
+            return None;
+        }
+        live.push(device.clone());
+        Some(Self(device))
+    }
+}
+impl Drop for AttachmentLease {
+    fn drop(&mut self) {
+        if let Ok(mut live) = ATTACHMENTS.lock() {
+            if let Some(index) = live.iter().position(|hash| *hash == self.0) {
+                live.remove(index);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DesktopReply {
+    ok: bool,
+    workspace: Option<LocalWorkspaceSnapshot>,
+    error: Option<String>,
+}
+
+pub(super) struct WorkspaceError {
+    pub(super) code: u16,
+    pub(super) reason: &'static str,
+    pub(super) error: &'static str,
+}
+
+pub(super) fn workspace() -> Result<WorkspaceSnapshot, WorkspaceError> {
+    let reply = match crate::ipc_request("desktop-workspace") {
+        crate::Ipc::Reply(reply) => reply,
+        crate::Ipc::NoDaemon => return Err(unavailable("desktop_unavailable")),
+        crate::Ipc::Stalled => {
+            return Err(WorkspaceError {
+                code: 504,
+                reason: "Gateway Timeout",
+                error: "desktop_timeout",
+            })
+        }
+    };
+    let local = decode_reply(&reply)?;
+    let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
+    Ok(WorkspaceSnapshot { machine_id, local })
+}
+
+fn unavailable(error: &'static str) -> WorkspaceError {
+    WorkspaceError {
+        code: 503,
+        reason: "Service Unavailable",
+        error,
+    }
+}
+
+fn decode_reply(reply: &str) -> Result<LocalWorkspaceSnapshot, WorkspaceError> {
+    let invalid = || WorkspaceError {
+        code: 502,
+        reason: "Bad Gateway",
+        error: "invalid_desktop_response",
+    };
+    if reply.len() > 1024 * 1024 {
+        return Err(invalid());
+    }
+    let reply: DesktopReply = serde_json::from_str(reply).map_err(|_| invalid())?;
+    if !reply.ok {
+        return Err(match reply.error.as_deref() {
+            Some("desktop_not_ready") => unavailable("desktop_not_ready"),
+            Some("too_many_desktop_cards") => unavailable("too_many_desktop_cards"),
+            _ => invalid(),
+        });
+    }
+    let snapshot = reply.workspace.ok_or_else(invalid)?;
+    if snapshot.epoch.is_empty()
+        || snapshot.revision == 0
+        || snapshot.cards.len() > crate::workspace_model::MAX_DESKTOP_CARDS
+        || snapshot.folders.len() > crate::desktop_protocol::MAX_FOLDERS
+        || snapshot
+            .folders
+            .iter()
+            .any(|folder| folder.len() > crate::desktop_protocol::MAX_WORKSPACE)
+        || snapshot.canvas.width == 0
+        || snapshot.canvas.height == 0
+        || !snapshot.canvas.scale.is_finite()
+        || snapshot.canvas.scale <= 0.0
+    {
+        return Err(invalid());
+    }
+    Ok(snapshot)
+}
+
+/// One bounded per-device cache of command answers, for mutation
+/// deduplication inside one daemon epoch.
+///
+/// A viewer never retries automatically; this exists so a retried request id
+/// (a resent request, a proxy replay) cannot apply the same mutation twice. The
+/// epoch is part of the key: a restarted owner must not replay a command whose
+/// effect it cannot know, and its own revision checks refuse one anyway.
+mod dedup {
+    use std::sync::Mutex;
+
+    /// Answers kept per device and across all devices.
+    const PER_DEVICE: usize = 16;
+    const TOTAL: usize = 256;
+    const REQUESTS: usize = 8 * 1024;
+
+    /// Longest command document accepted from a viewer.
+    pub(super) const MAX_REQUEST_BODY: usize = REQUESTS;
+
+    #[derive(Clone)]
+    pub(super) struct Answer {
+        pub(super) code: u16,
+        pub(super) reason: &'static str,
+        pub(super) document: String,
+    }
+
+    pub(super) enum Reservation {
+        /// First sight of this request id: the caller must apply and record.
+        Fresh,
+        /// Applied earlier in this epoch: replay this exact answer.
+        Cached(Answer),
+        /// Sent, but the outcome is unknown (owner timeout). Never retried.
+        Uncertain,
+    }
+
+    struct Entry {
+        device: String,
+        epoch: String,
+        request_id: String,
+        answer: Option<Answer>,
+    }
+
+    fn live() -> std::sync::MutexGuard<'static, Vec<Entry>> {
+        static ENTRIES: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+        // A panic while handling another command must not make this device's
+        // commands permanently unanswerable.
+        ENTRIES.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Claim a request id for this epoch, or report what is already known about
+    /// it. Claiming happens before the owner is asked, so two in-flight copies
+    /// of one request id cannot both reach it.
+    pub(super) fn reserve(device: &str, epoch: &str, request_id: &str) -> Reservation {
+        let mut live = live();
+        // Entries from another epoch can never be replayed meaningfully.
+        live.retain(|entry| entry.epoch == epoch);
+        if let Some(entry) = live
+            .iter()
+            .find(|entry| entry.device == device && entry.request_id == request_id)
+        {
+            return match entry.answer.clone() {
+                Some(answer) => Reservation::Cached(answer),
+                None => Reservation::Uncertain,
+            };
+        }
+        while live.len() >= TOTAL
+            || live.iter().filter(|entry| entry.device == device).count() >= PER_DEVICE
+        {
+            let Some(oldest) = live
+                .iter()
+                .position(|entry| entry.device == device)
+                .or(if live.is_empty() { None } else { Some(0) })
+            else {
+                break;
+            };
+            live.remove(oldest);
+        }
+        live.push(Entry {
+            device: device.to_string(),
+            epoch: epoch.to_string(),
+            request_id: request_id.to_string(),
+            answer: None,
+        });
+        Reservation::Fresh
+    }
+
+    /// Forget a claim whose request provably never reached the owner, so a
+    /// retry after a restart is served instead of refused.
+    pub(super) fn release(device: &str, epoch: &str, request_id: &str) {
+        let mut live = live();
+        live.retain(|entry| {
+            !(entry.device == device && entry.epoch == epoch && entry.request_id == request_id)
+        });
+    }
+
+    /// Remember what the owner answered. A request left unrecorded stays
+    /// uncertain on purpose: its outcome must never be guessed.
+    pub(super) fn record(device: &str, epoch: &str, request_id: &str, answer: Answer) {
+        let mut live = live();
+        if let Some(entry) = live.iter_mut().find(|entry| {
+            entry.device == device && entry.epoch == epoch && entry.request_id == request_id
+        }) {
+            entry.answer = Some(answer);
+        }
+    }
+}
+
+/// Apply one typed workspace command from a paired device.
+///
+/// The route accepts only the command envelope: a card id from the owner's own
+/// snapshot, a request id, the epoch the viewer saw and the card revision it
+/// based the change on. The owner re-checks identity, epoch, revision and
+/// bounds before it mutates anything, so a stale viewer is told about the
+/// conflict with the owner's own geometry instead of overwriting a concurrent
+/// edit. Nothing here ever interpolates a shell command or a tmux target.
+pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
+    let invalid = |stream: &mut Connection| {
+        respond(
+            stream,
+            400,
+            "Bad Request",
+            &serde_json::json!({"error": "invalid_command"}),
+        )
+    };
+    if body.len() > dedup::MAX_REQUEST_BODY {
+        return invalid(stream);
+    }
+    let Ok(request) = serde_json::from_str::<CommandRequest>(body) else {
+        return invalid(stream);
+    };
+    let machine_id = pair_state()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .cfg
+        .bridge_id
+        .clone();
+    // A command addressed to another machine is refused before any dedup state
+    // is touched, and always for the same reason a stale viewer sees elsewhere.
+    if request.machine_id != machine_id {
+        return respond(
+            stream,
+            409,
+            "Conflict",
+            &serde_json::json!({"error": "wrong_machine"}),
+        );
+    }
+    if !crate::desktop_protocol::valid_request_id(&request.request_id) {
+        return invalid(stream);
+    }
+    // Shape and bounds are checked here and again in the owner, so a malformed
+    // command never costs an IPC round trip and never depends on one side's
+    // validation staying correct. The viewer gets the same code either way.
+    if let Some(error) = request.command.shape_error() {
+        return respond(
+            stream,
+            400,
+            "Bad Request",
+            &serde_json::json!({"error": error}),
+        );
+    }
+    match dedup::reserve(device, &request.expected_epoch, &request.request_id) {
+        dedup::Reservation::Cached(answer) => {
+            return respond(
+                stream,
+                answer.code,
+                answer.reason,
+                &serde_json::from_str(&answer.document).unwrap_or_default(),
+            )
+        }
+        // The owner may or may not have applied this exact request. Reporting
+        // an uncertain outcome is the only honest answer: it is never retried
+        // on the viewer's behalf, and the viewer refreshes its state instead.
+        dedup::Reservation::Uncertain => {
+            return respond(
+                stream,
+                409,
+                "Conflict",
+                &serde_json::json!({"error": "unknown_outcome"}),
+            )
+        }
+        dedup::Reservation::Fresh => {}
+    }
+    let payload = match serde_json::to_string(&request) {
+        Ok(payload) => payload,
+        Err(_) => {
+            dedup::release(device, &request.expected_epoch, &request.request_id);
+            return invalid(stream);
+        }
+    };
+    let reply = match crate::ipc_request(&format!("desktop-command {payload}")) {
+        crate::Ipc::Reply(reply) => reply,
+        crate::Ipc::NoDaemon => {
+            // The command never reached an owner, so its outcome is known to be
+            // "not applied": a retry after the daemon returns must be served,
+            // not refused as uncertain.
+            dedup::release(device, &request.expected_epoch, &request.request_id);
+            return respond(
+                stream,
+                503,
+                "Service Unavailable",
+                &serde_json::json!({"error": "desktop_unavailable"}),
+            )
+        }
+        // The request reached the owner but its answer did not; the outcome
+        // stays unknown in the dedup cache.
+        crate::Ipc::Stalled => {
+            return respond(
+                stream,
+                504,
+                "Gateway Timeout",
+                &serde_json::json!({"error": "desktop_timeout"}),
+            )
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
+    let outcome = match serde_json::from_value::<CommandOutcome>(parsed.clone()) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // The owner answered without a typed outcome: it could not read its
+            // own workspace, so nothing here was applied.
+            let error = parsed["error"]
+                .as_str()
+                .and_then(crate::desktop_protocol::known_command_error)
+                .unwrap_or("invalid_desktop_response");
+            let (code, reason) = crate::desktop_protocol::command_status(error);
+            return respond(stream, code, reason, &serde_json::json!({"error": error}));
+        }
+    };
+    let (code, reason) = outcome.status();
+    let document = serde_json::to_value(outcome.into_reply(&machine_id, &request.request_id))
+        .unwrap_or_default();
+    dedup::record(
+        device,
+        &request.expected_epoch,
+        &request.request_id,
+        dedup::Answer {
+            code,
+            reason,
+            document: document.to_string(),
+        },
+    );
+    respond(stream, code, reason, &document);
+}
+
+pub(super) fn get_workspace(stream: &mut Connection) {
+    match workspace() {
+        Ok(snapshot) => respond(stream, 200, "OK", &serde_json::to_value(snapshot).unwrap()),
+        Err(error) => respond(
+            stream,
+            error.code,
+            error.reason,
+            &serde_json::json!({"error":error.error}),
+        ),
+    }
+}
+
+/// Resolve an owned card to its session. The snapshot is the daemon's own
+/// workspace, so this cannot reach an unmanaged tmux session.
+fn resolve_session(card_id: &str) -> Result<String, &'static str> {
+    let snapshot = workspace().map_err(|error| error.error)?;
+    let card = snapshot
+        .local
+        .cards
+        .iter()
+        .find(|card| card.card_id == card_id)
+        .ok_or("unknown_card")?;
+    if card.session_alive == Some(false) {
+        return Err("terminal_exited");
+    }
+    if !card.session_name.starts_with("dw_term_") {
+        return Err("unknown_card");
+    }
+    Ok(card.session_name.clone())
+}
+
+/// Everything the attach route needs before it upgrades: the resolved owned
+/// session, the host's own grid, and this stream's share of the attach budget.
+///
+/// Resolving before the upgrade keeps every failure an HTTP status with a stable
+/// code instead of a WebSocket that opens only to close immediately.
+pub(super) struct AttachTarget {
+    pub card_id: String,
+    session: String,
+    grid: TerminalSize,
+    _lease: AttachmentLease,
+}
+
+/// The host-owned grid, read before the upgrade so a viewer never receives a
+/// stream it could not be sized for.
+fn attach_error(code: u16, reason: &'static str, error: &'static str) -> WorkspaceError {
+    WorkspaceError { code, reason, error }
+}
+
+/// Resolve a card id to an attach target, or a typed error for the caller.
+pub(super) fn resolve_attach(
+    card_id: &str,
+    device: Option<&str>,
+) -> std::result::Result<AttachTarget, WorkspaceError> {
+    if !valid_card_id(card_id) {
+        return Err(attach_error(404, "Not Found", "unknown_card"));
+    }
+    // Authorization happens first in the route; a request without a credential
+    // identity must not consume the attachment budget either.
+    let Some(device) = device else {
+        return Err(attach_error(401, "Unauthorized", "unknown_card"));
+    };
+    let lease = AttachmentLease::acquire(device)
+        .ok_or_else(|| attach_error(429, "Too Many Requests", "attachment_limit"))?;
+    let session = match resolve_session(card_id) {
+        Ok(session) => session,
+        Err(error) => {
+            return Err(match error {
+                "terminal_exited" => attach_error(409, "Conflict", "terminal_exited"),
+                "desktop_unavailable" | "desktop_not_ready" => {
+                    attach_error(503, "Service Unavailable", error)
+                }
+                _ => attach_error(404, "Not Found", "unknown_card"),
+            })
+        }
+    };
+    let grid = crate::terminal_transport::grid(&session)
+        .map_err(|_| attach_error(503, "Service Unavailable", "terminal_grid_unknown"))?;
+    Ok(AttachTarget {
+        card_id: card_id.to_string(),
+        session,
+        grid,
+        _lease: lease,
+    })
+}
+
+/// Live terminal output for one card, over an upgraded WSS stream.
+///
+/// The host attaches its own tmux client at the grid it already owns and
+/// forwards raw PTY bytes in binary frames. The viewer may type back with its
+/// own binary frames (see [`apply_input`]); text frames stay control-only and
+/// anything else is ignored.
+pub(super) fn attach_terminal(stream: &mut Connection, target: AttachTarget) {
+    match PtyAttachment::open_at(&target.session, target.grid) {
+        Ok((pty, grid)) => pump(stream, pty, grid, &target.card_id),
+        Err(error) => {
+            // Reaching here means the session changed between resolution and
+            // attach, so the same stable codes still describe it.
+            let reason = match error.to_string().as_str() {
+                "invalid_owned_session_name" => "unknown_card",
+                "invalid_terminal_size" => "invalid_terminal_size",
+                "host_grid_mismatch" | "host_grid_unavailable" => "terminal_grid_unknown",
+                _ => "terminal_unavailable",
+            };
+            let _ = crate::ws::write_close(stream, 1011, reason);
+        }
+    }
+}
+
+/// What a client frame means for the pump loop.
+enum Peer {
+    Idle,
+    Closed,
+}
+
+fn pump(stream: &mut Connection, mut pty: PtyAttachment, grid: TerminalSize, card_id: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_nodelay(true);
+    let attached = AttachEvent::Attached {
+        card_id: card_id.to_string(),
+        columns: grid.columns,
+        rows: grid.rows,
+    };
+    if crate::ws::write_text(stream, &serde_json::to_string(&attached).unwrap()).is_err() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(ATTACH_MAX_SECS);
+    let mut heartbeat = Instant::now();
+    let mut grid_checked = Instant::now();
+    let mut last_grid = grid;
+    let mut draining = true;
+    while Instant::now() < deadline {
+        // Frames the peer already sent: never block on them, but never leave
+        // them unread behind buffered TLS either.
+        if draining {
+            loop {
+                let readable = match peer_readable(stream) {
+                    Some(readable) => readable,
+                    None => return,
+                };
+                if !readable {
+                    break;
+                }
+                if matches!(client_frame(stream, &mut pty), Peer::Closed) {
+                    return;
+                }
+            }
+            draining = false;
+        }
+        // Wake at least twice a second so the heartbeat and the attach deadline
+        // stay accurate while neither side has data.
+        let timeout = if heartbeat.elapsed() >= Duration::from_secs(15) {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(500)
+        };
+        let (peer_ready, pty_ready) = match wait_for_input(stream, &pty, timeout) {
+            Some(ready) => ready,
+            None => return,
+        };
+        if peer_ready {
+            draining = true;
+        }
+        if pty_ready {
+            match pty.read_output(Duration::ZERO) {
+                Ok(crate::terminal_transport::Output::Bytes(bytes)) if !bytes.is_empty() => {
+                    if crate::ws::write_binary(stream, &bytes).is_err() {
+                        return;
+                    }
+                    // A resize is followed by a full redraw, so this is where
+                    // a changed host grid is most cheaply noticed.
+                    if grid_checked.elapsed() >= Duration::from_secs(2) {
+                        grid_checked = Instant::now();
+                        if let Ok(live) = pty.host_grid() {
+                            if live != last_grid {
+                                last_grid = live;
+                                if send_grid(stream, live).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(crate::terminal_transport::Output::Bytes(_)) => {}
+                Ok(crate::terminal_transport::Output::Pending) => {}
+                Ok(crate::terminal_transport::Output::Closed) => {
+                    let _ = crate::ws::write_close(stream, 1000, "terminal_exited");
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+        if heartbeat.elapsed() >= Duration::from_secs(15) {
+            heartbeat = Instant::now();
+            if crate::ws::write_ping(stream, &[]).is_err() {
+                return;
+            }
+        }
+    }
+    let _ = crate::ws::write_close(stream, 1000, "reconnect");
+}
+
+fn send_grid(stream: &mut Connection, grid: TerminalSize) -> io::Result<()> {
+    let event = AttachEvent::Grid {
+        columns: grid.columns,
+        rows: grid.rows,
+    };
+    crate::ws::write_text(stream, &serde_json::to_string(&event).unwrap())
+}
+
+/// Poll both directions so neither one can starve the other.
+///
+/// `None` means the connection is gone (revoked, closed or broken). `Some`
+/// reports which descriptors have data within `timeout`.
+fn wait_for_input(stream: &Connection, pty: &PtyAttachment, timeout: Duration) -> Option<(bool, bool)> {
+    let socket: RawFd = stream.raw_fd()?;
+    let mut fds = [
+        libc::pollfd {
+            fd: socket,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: pty.raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout.as_millis() as i32) };
+    if ready < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Some((false, false));
+        }
+        return None;
+    }
+    if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return None;
+    }
+    if fds[1].revents & libc::POLLNVAL != 0 {
+        return None;
+    }
+    Some((
+        fds[0].revents & libc::POLLIN != 0,
+        fds[1].revents & (libc::POLLIN | libc::POLLHUP) != 0,
+    ))
+}
+
+/// Whether a complete client frame is queued. `None` means the peer is gone.
+///
+/// TLS may hold already-decrypted bytes that `poll` cannot see, so this probe
+/// is what keeps a second frame in the same record from stalling.
+fn peer_readable(stream: &mut Connection) -> Option<bool> {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1)));
+    match stream.peek(&mut [0u8; 1]) {
+        Ok(0) => None,
+        Ok(_) => Some(true),
+        Err(error) => match error.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Some(false),
+            _ => None,
+        },
+    }
+}
+
+fn client_frame(stream: &mut Connection, pty: &mut PtyAttachment) -> Peer {
+    // A complete frame is queued; a peer that stalls mid-frame is dropped rather
+    // than allowed to hold terminal output hostage.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    match crate::ws::read_frame(stream) {
+        Ok(None) | Ok(Some(crate::ws::Frame::Close)) => Peer::Closed,
+        Ok(Some(crate::ws::Frame::Ping(payload))) => {
+            if crate::ws::write_pong(stream, &payload).is_err() {
+                Peer::Closed
+            } else {
+                Peer::Idle
+            }
+        }
+        Ok(Some(crate::ws::Frame::Text(text))) => apply_control(stream, pty, &text),
+        // Keystrokes from the viewer: raw terminal bytes for the host PTY.
+        // Control frames and unrecognized opcodes stay ignored.
+        Ok(Some(crate::ws::Frame::Binary(bytes))) => {
+            apply_input(pty, &bytes);
+            Peer::Idle
+        }
+        Ok(Some(_)) => Peer::Idle,
+        Err(_) => Peer::Closed,
+    }
+}
+
+/// Write viewer keystrokes into the host PTY behind the shared input guard.
+///
+/// The guard serializes remote input against local, phone and image-prompt
+/// transactions on the same session. It never blocks: a busy guard, a slow
+/// PTY or a closed stream drops the input instead of queueing keys for a
+/// later, surprising replay. `read_frame` already bounds the chunk, so no
+/// partial escape sequence or UTF-8 character can corrupt the session: the
+/// PTY reassembles the byte stream.
+fn apply_input(pty: &mut PtyAttachment, bytes: &[u8]) {
+    if bytes.is_empty() || bytes.len() > crate::desktop_protocol::ATTACH_MAX_CHUNK {
+        return;
+    }
+    let Ok(_guard) = crate::prompt_image::input_guard(pty.session()) else {
+        return;
+    };
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match pty.write_input(rest) {
+            Ok(0) => return,
+            Ok(n) => rest = &rest[n..],
+            Err(_) => return,
+        }
+    }
+}
+
+fn apply_control(stream: &mut Connection, pty: &mut PtyAttachment, text: &str) -> Peer {
+    let Some(AttachCommand::Grid { columns, rows }) = AttachCommand::parse(text) else {
+        // Unknown or malformed controls are ignored; the stream stays usable.
+        return Peer::Idle;
+    };
+    let requested = TerminalSize { columns, rows };
+    match pty.host_grid() {
+        // The viewer only ever asks for the host's own grid, so applying it
+        // changes nothing that the host did not already decide.
+        Ok(live) if live == requested => {
+            if pty.set_view_size(requested).is_err() {
+                return Peer::Closed;
+            }
+        }
+        Ok(live) => {
+            if send_grid(stream, live).is_err() {
+                return Peer::Closed;
+            }
+        }
+        Err(_) => {}
+    }
+    Peer::Idle
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn malformed_and_unavailable_daemon_responses_are_not_empty_workspaces() {
+        for invalid in [
+            "{}",
+            "{\"ok\":true}",
+            "{\"ok\":true,\"workspace\":{}}",
+            "not json",
+        ] {
+            assert!(decode_reply(invalid).is_err());
+        }
+        let error = decode_reply(r#"{"ok":false,"error":"desktop_not_ready"}"#)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, 503);
+        assert_eq!(error.error, "desktop_not_ready");
+    }
+}

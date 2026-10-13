@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# DESKTOP WORKSPACE - Pure Native Rust Launcher
+set -e
+
+# Resolve installed symlinks with one process, not nested realpath/dirname/cd.
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="${SCRIPT_PATH%/bin/*}"
+
+# The control client does not link GTK/VTE or preload layer-shell. It delegates
+# cold starts and non-control commands to the full application.
+CLIENT_BIN="$SCRIPT_DIR/target/release/desktop-workspace-client"
+if [[ -x "$CLIENT_BIN" && -x "$SCRIPT_DIR/target/release/desktop-workspace" ]]; then
+    exec "$CLIENT_BIN" "$@"
+fi
+
+# Ensure GTK4 Layer Shell library is preloaded if present
+LAYER_SHELL_LIB="/usr/lib/libgtk4-layer-shell.so"
+if [[ -f "$LAYER_SHELL_LIB" ]]; then
+    if [[ ":$LD_PRELOAD:" != *":$LAYER_SHELL_LIB:"* ]]; then
+        export LD_PRELOAD="$LAYER_SHELL_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+fi
+
+RUST_BIN="$SCRIPT_DIR/target/release/desktop-workspace"
+if [[ ! -x "$RUST_BIN" ]]; then
+    echo "Building DESKTOP WORKSPACE (release binary)..." >&2
+    cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+fi
+
+exec "$RUST_BIN" "$@"

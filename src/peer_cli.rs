@@ -1,0 +1,333 @@
+use crate::{
+    peer_client::{self, Endpoint, Invitation, Pairing, PeerError, Result},
+    peer_store::PeerStore,
+    peer_terminal::{Event, TerminalStream},
+};
+use std::io::{BufRead, IsTerminal, Read, Write};
+use std::time::{Duration, Instant};
+
+pub fn run(action: &str, args: &[String]) -> Result<()> {
+    match action {
+        "peer-add" => add(args),
+        "peer-list" if args.is_empty() => {
+            let peers = PeerStore::default_store()?.peers()?;
+            output(&peers.iter().map(|p| p.summary()).collect::<Vec<_>>())
+        }
+        "peer-workspace" if args.len() == 1 => {
+            let peer = PeerStore::default_store()?.get(&args[0])?;
+            output(&peer_client::workspace(&peer)?)
+        }
+        "peer-forget" if args.len() == 1 => {
+            PeerStore::default_store()?.forget(&args[0])?;
+            output(&serde_json::json!({"forgotten":args[0]}))
+        }
+        "peer-attach" if !args.is_empty() => attach(args),
+        "peer-events" if !args.is_empty() => events(args),
+        "peer-command" if args.len() == 1 => command(&args[0]),
+        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-events ID [--seconds N] | peer-command ID < COMMAND.json | peer-forget ID")),
+    }
+}
+
+/// Stream one host console to stdout, and type stdin back when it is a pipe.
+///
+/// A debugging and verification tool: it exercises the same pinned WSS attach
+/// path the remote panel uses, so a two-PC problem can be narrowed to the
+/// transport or to the viewer. Terminal output is written unchanged, which
+/// means a real terminal shows exactly the host's colors. An interactive
+/// terminal keeps stdin for itself; a pipe (the smoke test, a here-string)
+/// is written to the host session as raw terminal bytes.
+fn attach(args: &[String]) -> Result<()> {
+    let (seconds, positionals) = stream_args(args)?;
+    let [machine_id, card_id] = positionals[..] else {
+        return Err(PeerError("peer_attach_requires_machine_and_card"));
+    };
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let (stream, mut events) = TerminalStream::open(peer, card_id);
+    // Piped stdin types into the host session: the same binary viewer→host
+    // frames the graphical remote cards use. An interactive terminal keeps
+    // stdin, so this command does not steal the keyboard.
+    let typing = !std::io::stdin().is_terminal();
+    if typing {
+        let sender = stream.sender();
+        std::thread::Builder::new()
+            .name("peer-attach-stdin".into())
+            .spawn(move || {
+                let mut input = std::io::stdin().lock();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match input.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            sender.send_input(&chunk[..n]);
+                            if sender.is_stopped() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            })
+            .ok();
+    }
+    let deadline = seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        match events.try_recv() {
+            Ok(Event::Bytes(bytes)) => stdout
+                .write_all(&bytes)
+                .and_then(|()| stdout.flush())
+                .map_err(|_| PeerError("output_failed"))?,
+            Ok(Event::Attached { columns, rows }) => {
+                eprintln!(
+                    "attached {columns}x{rows} · {}",
+                    if typing {
+                        "typing stdin into the host session"
+                    } else {
+                        "output only"
+                    }
+                )
+            }
+            Ok(Event::Grid { columns, rows }) => eprintln!("host grid {columns}x{rows}"),
+            // Normal endings are not failures; anything else keeps its code so
+            // a caller can tell trust problems from an exited session.
+            Ok(Event::Closed("closed" | "terminal_exited" | "reconnect")) => {
+                drop(stream);
+                eprintln!("detached");
+                return Ok(());
+            }
+            Ok(Event::Closed(reason)) => return Err(PeerError(reason)),
+            Err(futures_channel::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(2))
+            }
+            Err(futures_channel::mpsc::TryRecvError::Closed) => return Ok(()),
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(());
+        }
+    }
+}
+
+/// `--seconds N` and the positional arguments of a streaming command.
+fn stream_args(args: &[String]) -> Result<(Option<u64>, Vec<&str>)> {
+    let mut seconds = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--seconds" if seconds.is_none() => {
+                let value = args.get(index + 1).ok_or(PeerError("invalid_peer_attach_option"))?;
+                seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| PeerError("invalid_peer_attach_option"))?,
+                );
+                index += 2;
+            }
+            _ => {
+                positionals.push(args[index].as_str());
+                index += 1;
+            }
+        }
+    }
+    Ok((seconds, positionals))
+}
+
+/// Print a host's live workspace events, one JSON document per line.
+///
+/// The same subscription worker the machine selector uses (pinned WSS,
+/// validation, reconnect with backoff), so a two-PC problem can be narrowed to
+/// the event route. Connection changes go to stderr; a subscription that ends
+/// for good (revocation, identity change, an older host) exits with its code.
+fn events(args: &[String]) -> Result<()> {
+    let (seconds, positionals) = stream_args(args)?;
+    let [machine_id] = positionals[..] else {
+        return Err(PeerError("peer_events_requires_machine"));
+    };
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let (subscription, mut updates) = crate::peer_events::WorkspaceEvents::open(peer);
+    let deadline = seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        match updates.try_recv() {
+            Ok(crate::peer_events::Update::Event(event)) => {
+                serde_json::to_writer(&mut stdout, &event)
+                    .map_err(|_| PeerError("output_failed"))?;
+                writeln!(stdout)
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| PeerError("output_failed"))?;
+            }
+            Ok(crate::peer_events::Update::Connected) => eprintln!("subscribed"),
+            Ok(crate::peer_events::Update::Down) => eprintln!("reconnecting"),
+            Ok(crate::peer_events::Update::Ended(reason)) => return Err(PeerError(reason)),
+            Err(futures_channel::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(futures_channel::mpsc::TryRecvError::Closed) => return Ok(()),
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            drop(subscription);
+            return Ok(());
+        }
+    }
+}
+
+/// Send one typed workspace command, read as JSON from stdin, and print the
+/// host's answer together with what the remote workspace would show for it.
+///
+/// Input: `{"command": {...}}`, optionally with `expectedEpoch` (otherwise the
+/// host's current epoch is fetched first) and `requestId` (otherwise a fresh
+/// one). The same `peer_client::command` and `command_feedback` decision the
+/// card chrome and the top bar use, so a two-PC problem — a conflict, an
+/// unreachable host, an unknown outcome — can be reproduced from a shell.
+/// Nothing is retried: the command is sent at most once per invocation. Exits
+/// 0 when the host answered (applied, conflict or a typed refusal) and 1 when
+/// no answer came back, after printing the same JSON either way.
+fn command(machine_id: &str) -> Result<()> {
+    use crate::command_feedback::{self, CardCommand, Outcome, WorkspaceAction};
+    use crate::desktop_protocol::{CommandRequest, WorkspaceCommand};
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Input {
+        command: WorkspaceCommand,
+        expected_epoch: Option<String>,
+        request_id: Option<String>,
+    }
+    let mut text = String::new();
+    std::io::stdin()
+        .lock()
+        // The host refuses a command document larger than this anyway.
+        .take(8 * 1024)
+        .read_to_string(&mut text)
+        .map_err(|_| PeerError("command_input_failed"))?;
+    let input: Input = serde_json::from_str(&text).map_err(|_| PeerError("invalid_command"))?;
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let epoch = match input.expected_epoch {
+        Some(epoch) => epoch,
+        None => peer_client::workspace(&peer)?.local.epoch,
+    };
+    let mut request: CommandRequest = peer_client::request(&peer, &epoch, input.command);
+    if let Some(request_id) = input.request_id {
+        request.request_id = request_id;
+    }
+    let result = peer_client::command(&peer, &request);
+    let outcome = match &result {
+        Ok(reply) => Outcome::of_reply(reply),
+        Err(error) => Outcome::Failed(error.0),
+    };
+    let tone = |tone: command_feedback::Tone| match tone {
+        command_feedback::Tone::Info => "info",
+        command_feedback::Tone::Warning => "warning",
+        command_feedback::Tone::Error => "error",
+    };
+    let (notice, geometry, refresh) = match CardCommand::of(&request.command) {
+        Some(kind) => {
+            let feedback = command_feedback::for_card(kind, outcome);
+            let geometry = match feedback.geometry {
+                command_feedback::Geometry::Adopt => "adopt",
+                command_feedback::Geometry::SnapToHost => "snapToHost",
+                command_feedback::Geometry::Revert => "revert",
+            };
+            (feedback.notice, Some(geometry), Some(feedback.refresh))
+        }
+        None => {
+            let action = match request.command {
+                WorkspaceCommand::SetWorkspace { .. } => WorkspaceAction::Folder,
+                _ => WorkspaceAction::Create,
+            };
+            (command_feedback::for_workspace(action, outcome), None, None)
+        }
+    };
+    output(&serde_json::json!({
+        "requestId": request.request_id,
+        "reply": result.as_ref().ok(),
+        "error": result.as_ref().err().map(|error| error.0),
+        "notice": notice.map(|notice| notice.text),
+        "tone": notice.map(|notice| tone(notice.tone)),
+        "geometry": geometry,
+        "refresh": refresh,
+    }))?;
+    result.map(|_| ())
+}
+
+fn output(value: &impl serde::Serialize) -> Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value).map_err(|_| PeerError("output_failed"))?;
+    writeln!(stdout).map_err(|_| PeerError("output_failed"))
+}
+struct EchoGuard(Option<libc::termios>);
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.0 {
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, &state);
+            }
+        }
+    }
+}
+fn add(args: &[String]) -> Result<()> {
+    let (mut host, mut port, mut name) = (None, None, None);
+    if args.len() % 2 != 0 {
+        return Err(PeerError("peer_add_requires_option_value_pairs"));
+    }
+    for pair in args.chunks_exact(2) {
+        match pair[0].as_str() {
+            "--host" if host.is_none() => host = Some(pair[1].as_str()),
+            "--port" if port.is_none() => {
+                port = Some(
+                    pair[1]
+                        .parse::<u16>()
+                        .map_err(|_| PeerError("invalid_peer_port"))?,
+                )
+            }
+            "--name" if name.is_none() => name = Some(pair[1].as_str()),
+            _ => return Err(PeerError("invalid_peer_add_option")),
+        }
+    }
+    // Validate storage before consuming the host's invitation, without holding
+    // the registry lock while waiting for approval.
+    PeerStore::default_store()?.peers()?;
+    let input = std::io::stdin();
+    let mut guard = EchoGuard(None);
+    if input.is_terminal() {
+        eprintln!("Paste the host's pairing invitation, then press Enter (input hidden):");
+        unsafe {
+            let mut state: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut state) != 0 {
+                return Err(PeerError("cannot_hide_invitation_input"));
+            }
+            let mut hidden = state;
+            hidden.c_lflag &= !libc::ECHO;
+            if libc::tcsetattr(0, libc::TCSANOW, &hidden) != 0 {
+                return Err(PeerError("cannot_hide_invitation_input"));
+            }
+            guard.0 = Some(state);
+        }
+    }
+    let mut line = String::new();
+    std::io::BufReader::new(input.lock().take((peer_client::MAX_INVITATION + 1) as u64))
+        .read_line(&mut line)
+        .map_err(|_| PeerError("invitation_input_failed"))?;
+    drop(guard);
+    let mut invitation = Invitation::parse(&line)?;
+    invitation.endpoint = Endpoint::new(
+        host.unwrap_or(&invitation.endpoint.host),
+        port.unwrap_or(invitation.endpoint.port),
+    )?;
+    let local_id = crate::bridge::own_bridge_id();
+    let pairing = Pairing::begin(
+        invitation,
+        local_id.as_deref(),
+        &crate::bridge::hostname(),
+        name,
+    )?;
+    eprintln!("Compare code {} on the host. Approve it in the host's connection-request panel only if it matches.", pairing.code);
+    loop {
+        if let Some(peer) = pairing.poll()? {
+            let summary = peer.summary();
+            PeerStore::default_store()?.upsert(peer)?;
+            return output(&summary);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
