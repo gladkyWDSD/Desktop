@@ -26,6 +26,8 @@ pub struct Appearance {
     pub settings: Edge,
     pub transparent: bool,
     pub background_opacity: u8,
+    /// The desktop's background colour as RGB; `None` keeps the theme's.
+    pub background_color: Option<[u8; 3]>,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Default for Appearance {
             settings: Edge::Right,
             transparent: false,
             background_opacity: 24,
+            background_color: None,
         }
     }
 }
@@ -56,9 +59,178 @@ pub fn apply(value: Appearance) {
         listener(value);
     }
 }
+/// Colour used under a transparent desktop when the theme's is kept: the
+/// previous fixed tint.
+const DEFAULT_TINT: [u8; 3] = [13, 16, 32];
+
+/// Ready-made background colours offered in Settings, before "Custom".
+pub const SWATCHES: [(&str, [u8; 3]); 6] = [
+    ("Black", [0, 0, 0]),
+    ("Midnight", [13, 16, 32]),
+    ("Graphite", [30, 31, 36]),
+    ("Navy", [15, 27, 51]),
+    ("Plum", [33, 20, 46]),
+    ("Forest", [15, 32, 24]),
+];
+
+/// The window background rule for `value`, or `None` to keep the theme's
+/// opaque background. A chosen colour applies with or without transparency;
+/// transparency uses the opacity slider.
+pub fn background_css(value: &Appearance) -> Option<String> {
+    if !value.transparent && value.background_color.is_none() {
+        return None;
+    }
+    let [r, g, b] = value.background_color.unwrap_or(DEFAULT_TINT);
+    let alpha = if value.transparent {
+        value.background_opacity.clamp(5, 100) as f64 / 100.0
+    } else {
+        1.0
+    };
+    Some(format!(
+        "window.desktop-workspace-window.cosmic-transparent {{ background-color: rgba({r}, {g}, {b}, {alpha}); background-image: none; }}"
+    ))
+}
+
+pub fn hex(rgb: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
 pub fn subscribe(callback: Rc<dyn Fn(Appearance)>) {
     callback(current());
     LISTENERS.with(|listeners| listeners.borrow_mut().push(callback));
+}
+
+/// A round colour sample, `rgb` read on every draw so one can follow a choice.
+fn swatch_area(rgb: Rc<std::cell::Cell<[u8; 3]>>) -> gtk4::DrawingArea {
+    let area = gtk4::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_draw_func(move |_, cr, width, height| {
+        let [r, g, b] = rgb.get();
+        let (w, h) = (width as f64, height as f64);
+        cr.arc(w / 2.0, h / 2.0, w.min(h) / 2.0 - 1.0, 0.0, std::f64::consts::TAU);
+        cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        let _ = cr.fill_preserve();
+        // A light rim, so black still reads as a colour on a dark panel.
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.28);
+        cr.set_line_width(1.0);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+/// "Background colour": the theme's, a ready-made one, or any colour.
+fn color_controls(body: &gtk4::Box, state: Rc<RefCell<crate::state::AppState>>) {
+    let label = gtk4::Label::new(Some("Background colour"));
+    label.set_xalign(0.0);
+    body.append(&label);
+    let row = gtk4::Box::new(Orientation::Horizontal, 6);
+    row.add_css_class("bg-swatches");
+
+    let theme = gtk4::Button::with_label("Theme");
+    theme.add_css_class("bg-swatch-theme");
+    theme.set_tooltip_text(Some("Use the Omarchy theme's background"));
+    row.append(&theme);
+    let mut presets = Vec::new();
+    for (name, rgb) in SWATCHES {
+        let button = gtk4::Button::new();
+        button.add_css_class("bg-swatch");
+        button.set_tooltip_text(Some(&format!("{name} ({})", hex(rgb))));
+        button.update_property(&[gtk4::accessible::Property::Label(name)]);
+        button.set_child(Some(&swatch_area(Rc::new(std::cell::Cell::new(rgb)))));
+        row.append(&button);
+        presets.push((rgb, button));
+    }
+    let custom_rgb = Rc::new(std::cell::Cell::new(
+        state.borrow().appearance.background_color.unwrap_or([128, 128, 128]),
+    ));
+    let custom_area = swatch_area(Rc::clone(&custom_rgb));
+    let custom_row = gtk4::Box::new(Orientation::Horizontal, 6);
+    custom_row.append(&custom_area);
+    custom_row.append(&gtk4::Label::new(Some("Custom…")));
+    let custom = gtk4::MenuButton::new();
+    custom.add_css_class("bg-swatch-custom");
+    custom.set_child(Some(&custom_row));
+    custom.set_tooltip_text(Some("Pick any colour"));
+    row.append(&custom);
+    body.append(&row);
+
+    // Shows which choice is in use.
+    let paint: Rc<dyn Fn(Option<[u8; 3]>)> = {
+        let (theme, custom, custom_area, custom_rgb) = (theme.clone(), custom.clone(), custom_area.clone(), Rc::clone(&custom_rgb));
+        let presets = presets.clone();
+        Rc::new(move |chosen| {
+            let mark = |widget: &gtk4::Widget, on: bool| {
+                if on { widget.add_css_class("bg-swatch-selected") } else { widget.remove_css_class("bg-swatch-selected") }
+            };
+            mark(theme.upcast_ref(), chosen.is_none());
+            let mut preset = false;
+            for (rgb, button) in &presets {
+                let on = chosen == Some(*rgb);
+                preset |= on;
+                mark(button.upcast_ref(), on);
+            }
+            mark(custom.upcast_ref(), chosen.is_some() && !preset);
+            if let Some(rgb) = chosen.filter(|_| !preset) {
+                custom_rgb.set(rgb);
+                custom_area.queue_draw();
+            }
+        })
+    };
+    let choose: Rc<dyn Fn(Option<[u8; 3]>)> = {
+        let (state, paint) = (Rc::clone(&state), Rc::clone(&paint));
+        Rc::new(move |chosen| {
+            let snapshot = {
+                let mut state = state.borrow_mut();
+                state.appearance.background_color = chosen;
+                state.clone()
+            };
+            apply(snapshot.appearance);
+            crate::state::save_state_async(snapshot);
+            paint(chosen);
+        })
+    };
+    paint(state.borrow().appearance.background_color);
+    theme.connect_clicked({
+        let choose = Rc::clone(&choose);
+        move |_| choose(None)
+    });
+    for (rgb, button) in presets {
+        let choose = Rc::clone(&choose);
+        button.connect_clicked(move |_| choose(Some(rgb)));
+    }
+
+    // A popover, not a dialog: a dialog window would open under the overlay.
+    let popover = gtk4::Popover::new();
+    let picker_box = gtk4::Box::new(Orientation::Vertical, 8);
+    #[allow(deprecated)]
+    let chooser = {
+        let chooser = gtk4::ColorChooserWidget::new();
+        chooser.set_use_alpha(false);
+        chooser.set_show_editor(true);
+        let [r, g, b] = custom_rgb.get();
+        chooser.set_rgba(&gtk4::gdk::RGBA::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+        chooser
+    };
+    picker_box.append(&chooser);
+    let use_it = gtk4::Button::with_label("Use this colour");
+    use_it.add_css_class("launcher-btn");
+    use_it.add_css_class("launcher-btn-primary");
+    picker_box.append(&use_it);
+    popover.set_child(Some(&picker_box));
+    custom.set_popover(Some(&popover));
+    use_it.connect_clicked({
+        let popover = popover.downgrade();
+        move |_| {
+            #[allow(deprecated)]
+            let rgba = chooser.rgba();
+            let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            choose(Some([channel(rgba.red()), channel(rgba.green()), channel(rgba.blue())]));
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        }
+    });
 }
 
 /// Both local and remote bars use the same orientation and scrolling rules.
@@ -219,6 +391,7 @@ pub fn settings_controls(parent: &gtk4::Box, state: Rc<RefCell<crate::state::App
         row.append(&picker);
         body.append(&row);
     }
+    color_controls(&body, Rc::clone(&state));
     let row = gtk4::Box::new(Orientation::Horizontal, 12);
     let label = gtk4::Label::new(Some("Transparent desktop"));
     label.set_hexpand(true);
@@ -296,6 +469,75 @@ mod tests {
         apply(Appearance::default());
     }
     #[test]
+    fn the_background_follows_the_chosen_colour_and_opacity() {
+        let theme = Appearance::default();
+        assert_eq!(background_css(&theme), None, "the theme's own background");
+        let tinted = Appearance { transparent: true, background_opacity: 40, ..theme };
+        assert!(background_css(&tinted).unwrap().contains("rgba(13, 16, 32, 0.4)"));
+        let black = Appearance { background_color: Some([0, 0, 0]), ..theme };
+        assert!(background_css(&black).unwrap().contains("rgba(0, 0, 0, 1)"), "opaque without transparency");
+        let see_through = Appearance { background_color: Some([33, 20, 46]), transparent: true, background_opacity: 0, ..theme };
+        assert!(background_css(&see_through).unwrap().contains("rgba(33, 20, 46, 0.05)"), "never fully invisible");
+        assert_eq!(hex([15, 27, 51]), "#0f1b33");
+    }
+
+    #[test]
+    fn background_colour_choices_are_saved() {
+        crate::gtk_test::run_in_child_process("appearance::tests::colour_choices_child");
+    }
+
+    #[test]
+    fn colour_choices_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        // Choices are saved: never into the user's own state file.
+        let home = std::env::temp_dir().join(format!("dw-appearance-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let state = Rc::new(RefCell::new(crate::state::AppState::default()));
+        let parent = gtk4::Box::new(Orientation::Vertical, 0);
+        settings_controls(&parent, Rc::clone(&state));
+        fn find(widget: &gtk4::Widget, class: &str, found: &mut Vec<gtk4::Widget>) {
+            if widget.has_css_class(class) {
+                found.push(widget.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                find(&next, class, found);
+                child = next.next_sibling();
+            }
+        }
+        let all = |class: &str| {
+            let mut found = Vec::new();
+            find(parent.upcast_ref(), class, &mut found);
+            found
+        };
+        let swatches = all("bg-swatch");
+        assert_eq!(swatches.len(), SWATCHES.len());
+        let theme = all("bg-swatch-theme").pop().unwrap().downcast::<gtk4::Button>().unwrap();
+        assert!(theme.has_css_class("bg-swatch-selected"), "the theme's colour to start with");
+
+        swatches[0].clone().downcast::<gtk4::Button>().unwrap().emit_clicked();
+        assert_eq!(state.borrow().appearance.background_color, Some(SWATCHES[0].1));
+        assert_eq!(current().background_color, Some(SWATCHES[0].1));
+        assert!(swatches[0].has_css_class("bg-swatch-selected") && !theme.has_css_class("bg-swatch-selected"));
+        assert!(background_css(&current()).unwrap().contains("rgba(0, 0, 0, 1)"));
+
+        theme.emit_clicked();
+        assert_eq!(state.borrow().appearance.background_color, None);
+        assert!(theme.has_css_class("bg-swatch-selected") && !swatches[0].has_css_class("bg-swatch-selected"));
+        crate::state::flush_state_saves();
+        let saved = std::fs::read_to_string(home.join(".config/desktop-workspace/state.json")).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["appearance"]["background_color"], serde_json::Value::Null);
+        assert!(saved["appearance"].get("background_color").is_some(), "the choice is saved");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn toolbar_edges_fit_logical_screen() {
         for screen in [
             (320, 480),
@@ -316,6 +558,7 @@ mod tests {
             settings: Edge::Bottom,
             transparent: true,
             background_opacity: 42,
+            background_color: Some([12, 34, 56]),
         };
         assert_eq!(
             serde_json::from_str::<Appearance>(&serde_json::to_string(&value).unwrap()).unwrap(),

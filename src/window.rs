@@ -424,11 +424,13 @@ impl SuperDesktopWindow {
                 gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
             move |appearance| {
                 if let Some(window) = window.upgrade() {
-                    provider.load_from_string(&format!(
-                        "window.desktop-workspace-window.cosmic-transparent {{ background-color: rgba(13, 16, 32, {}); background-image: none; }}",
-                        appearance.background_opacity as f64 / 100.0));
-                    if appearance.transparent { window.add_css_class("cosmic-transparent"); }
-                    else { window.remove_css_class("cosmic-transparent"); }
+                    match crate::appearance::background_css(&appearance) {
+                        Some(css) => {
+                            provider.load_from_string(&css);
+                            window.add_css_class("cosmic-transparent");
+                        }
+                        None => window.remove_css_class("cosmic-transparent"),
+                    }
                 }
             }
         }));

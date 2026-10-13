@@ -125,31 +125,38 @@ window.sd-hot-corner {{
 
 .hud-button,
 menubutton.machine-selector > button {{
-    background-color: transparent;
+    background-color: alpha({foreground}, 0.06);
     background-image: none;
     color: {light_foreground};
-    border: none;
-    border-radius: 6px;
+    border: 1px solid alpha({foreground}, 0.06);
+    border-radius: 10px;
     box-shadow: none;
-    padding: 6px 10px;
+    padding: 6px 12px;
     font-size: 12px;
     font-weight: 600;
-    transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }}
 
 .hud-button:hover,
 menubutton.machine-selector > button:hover {{
-    background-color: {btn_hover_bg};
+    background-color: alpha({accent}, 0.14);
+    border-color: alpha({accent}, 0.30);
     color: {bright_foreground};
-    box-shadow: inset 0 -2px {accent};
+    box-shadow: none;
 }}
 
 .hud-button:active,
 menubutton.machine-selector > button:active,
 menubutton.machine-selector > button:checked {{
-    background-color: {badge_bg};
+    background-color: alpha({accent}, 0.24);
+    border-color: alpha({accent}, 0.45);
     color: {accent};
-    box-shadow: inset 0 -2px {accent};
+    box-shadow: none;
+}}
+
+.hud-button:focus-visible {{
+    outline: 2px solid alpha({accent}, 0.7);
+    outline-offset: 1px;
 }}
 
 .hud-action-primary {{
@@ -204,6 +211,7 @@ button.machine-peer-selected {{
     padding: 0;
     min-width: 36px;
     min-height: 36px;
+    border-radius: 10px;
 }}
 .hud-gear image,
 .hud-icon-btn image {{
@@ -217,9 +225,10 @@ button.machine-peer-selected {{
 }}
 
 .hud-button-danger:hover {{
-    background-color: {danger_bg};
+    background-color: alpha({bright_red}, 0.16);
+    border-color: alpha({bright_red}, 0.35);
     color: {bright_red};
-    box-shadow: inset 0 -2px {bright_red};
+    box-shadow: none;
 }}
 
 .hud-shortcut {{
@@ -875,15 +884,42 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     background: transparent;
     border: none;
     color: {light_foreground};
-    padding: 3px 6px;
-    border-radius: 6px;
-    font-size: 11px;
-    transition: background-color 150ms ease;
+    padding: 0;
+    min-width: 26px;
+    min-height: 26px;
+    border-radius: 8px;
+    font-size: 12px;
+    transition: background-color 120ms ease, color 120ms ease;
 }}
 
 .term-btn:hover {{
     color: {bright_foreground};
-    background-color: {btn_hover_bg};
+    background-color: alpha({foreground}, 0.10);
+}}
+
+.term-btn:active {{
+    background-color: alpha({accent}, 0.20);
+}}
+
+.term-btn.term-btn-close:hover {{
+    color: {bright_red};
+    background-color: alpha({bright_red}, 0.16);
+}}
+
+/* "+ file" on a card's header: add files to the session's prompt. */
+.term-attach-plus {{
+    font-size: 19px;
+    font-weight: 800;
+    color: {accent};
+}}
+
+.term-attach-icon {{
+    -gtk-icon-size: 15px;
+}}
+
+/* Files dragged over a card that will take them. */
+.mini-terminal.term-attach-drop .term-preview-box {{
+    border: 2px dashed {accent};
 }}
 
 .term-preview-box {{
@@ -1349,25 +1385,61 @@ separator.launcher-sep {{
 
 /* Buttons keep the HUD pill language, sized for a panel */
 .launcher-btn {{
-    background-color: {btn_bg};
+    background-color: alpha({foreground}, 0.07);
     color: {foreground};
-    border: 1px solid {btn_border};
-    border-radius: 9px;
-    padding: 6px 12px;
+    border: 1px solid alpha({foreground}, 0.08);
+    border-radius: 10px;
+    padding: 7px 14px;
     font-size: 11.5px;
     font-weight: 600;
-    transition: background-color 150ms ease, border-color 150ms ease;
+    transition: background-color 120ms ease, border-color 120ms ease;
 }}
 
 .launcher-btn:hover {{
-    background-color: {btn_hover_bg};
+    background-color: alpha({accent}, 0.14);
     color: {bright_foreground};
-    border-color: {accent};
+    border-color: alpha({accent}, 0.35);
 }}
 
 .launcher-btn-primary {{
-    background-color: {badge_bg};
-    color: {accent};
+    background-color: {accent};
+    color: {darker_background};
+    border-color: {accent};
+}}
+
+.launcher-btn-primary:hover {{
+    background-color: shade({accent}, 1.08);
+    color: {darker_background};
+    border-color: {accent};
+}}
+
+/* Background colour choices (Settings → Top bar → Make it yours). */
+.bg-swatches button {{
+    background: none;
+    border: 2px solid transparent;
+    border-radius: 9999px;
+    padding: 2px;
+    min-width: 0;
+    min-height: 0;
+    box-shadow: none;
+}}
+.bg-swatches button.bg-swatch-theme,
+.bg-swatches menubutton.bg-swatch-custom > button {{
+    padding: 3px 10px;
+    color: {foreground};
+    background-color: alpha({foreground}, 0.07);
+}}
+.bg-swatches menubutton.bg-swatch-custom {{
+    padding: 0;
+    border: none;
+    background: none;
+}}
+.bg-swatches button:hover,
+.bg-swatches menubutton.bg-swatch-custom > button:hover {{
+    border-color: alpha({accent}, 0.45);
+}}
+.bg-swatches .bg-swatch-selected,
+.bg-swatches menubutton.bg-swatch-selected > button {{
     border-color: {accent};
 }}
 
