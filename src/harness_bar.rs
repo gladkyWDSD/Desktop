@@ -12,6 +12,10 @@ use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Space kept free on both sides of the launchers, the same as between two of
+/// them, so a launcher never touches the button before or after the group.
+const LAUNCHER_GAP: i32 = 10;
+
 /// Display name and icon of one harness. One source of truth so the local HUD
 /// and a remote host's bar cannot label the same harness differently.
 pub fn harness_label(key: &str) -> (&'static str, &'static str) {
@@ -156,6 +160,11 @@ impl HarnessBar {
         group.add_css_class("hud-launchers");
         group.set_halign(gtk4::Align::Center);
         group.set_valign(gtk4::Align::Center);
+        // The top bar centers the group but pushes it against a wide left
+        // side (brand, folder field, sticky-note button); the margins keep it
+        // apart.
+        group.set_margin_start(LAUNCHER_GAP);
+        group.set_margin_end(LAUNCHER_GAP);
         let note = gtk4::Label::new(None);
         note.add_css_class("term-preview-text");
         note.set_halign(gtk4::Align::Center);
@@ -464,6 +473,45 @@ mod tests {
 
         let none = HarnessState::none();
         assert!(none.keys.is_empty() && !none.ready);
+    }
+
+    #[test]
+    fn toolbar_launchers_keep_a_gap_from_the_note_button() {
+        crate::gtk_test::run_in_child_process("harness_bar::tests::gap_inner");
+    }
+
+    #[test]
+    fn gap_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let bar = HarnessBar::new(Rc::new(|_: &str| {}), Rc::new(|_: &gtk4::Button, _: &str| false));
+        bar.apply(&HarnessState {
+            keys: vec!["claude".into(), "codex".into(), "shell".into()],
+            custom: vec![],
+            ready: true,
+        });
+        // A left side wide enough that the bar pushes the launchers against it.
+        let left = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        let folder = gtk4::Entry::new();
+        folder.set_width_chars(60);
+        let note = gtk4::Button::with_label("📝 +");
+        left.append(&folder);
+        left.append(&note);
+        let right = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        let content = crate::window::top_bar_content(&left, &bar.group, &right);
+        let width = |w: &gtk4::Widget| w.measure(gtk4::Orientation::Horizontal, -1).1;
+        // Exactly enough room: the bar's 10px spacing before the right side.
+        let row_width = width(left.upcast_ref()) + width(bar.group.upcast_ref()) + 10;
+        let (_, height, _, _) = content.measure(gtk4::Orientation::Vertical, row_width);
+        content.allocate(row_width, height, -1, None);
+        let note_end = note.compute_bounds(&content).map(|b| b.x() + b.width()).unwrap();
+        let first = bar.buttons().into_iter().find(|(_, button)| button.is_visible()).unwrap().1;
+        let first_start = first.compute_bounds(&content).map(|b| b.x()).unwrap();
+        assert!(first_start - note_end >= LAUNCHER_GAP as f32 - 0.5,
+            "the first launcher touches the note button: {note_end} → {first_start}");
     }
 
     #[test]
