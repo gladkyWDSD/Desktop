@@ -173,6 +173,11 @@ pub struct AppState {
     /// display in use, so a size from a larger screen still opens whole here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_panel_size: Option<(i32, i32)>,
+    /// How many harness cards were started on this PC, by harness key. When
+    /// the top bar is too narrow for every launcher's name, the most used
+    /// keep theirs longest (see `harness_bar::collapse_order`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub harness_launches: std::collections::BTreeMap<String, u64>,
 }
 
 impl Default for AppState {
@@ -205,6 +210,7 @@ impl Default for AppState {
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,
             settings_panel_size: None,
+            harness_launches: std::collections::BTreeMap::new(),
         }
     }
 }

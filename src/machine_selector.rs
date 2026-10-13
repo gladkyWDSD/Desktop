@@ -169,6 +169,9 @@ impl MachineView {
             Rc::new(|_: &gtk4::Button, _: &str| false),
         );
         toolbar.append(&crate::window::top_bar_content(&chrome, &bar.group, &right));
+        // That PC's launch counts are not known here: its launchers lose
+        // their names from the right.
+        bar.bind_fit(&chrome);
         remote.append(&toolbar);
         remote.append(&bar.note);
         let canvas = RemoteCanvas::new();

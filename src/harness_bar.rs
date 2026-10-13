@@ -8,8 +8,10 @@
 //! Nothing here decides how a harness starts: the machine that runs it does.
 use crate::desktop_protocol::WorkspaceSnapshot;
 use crate::peer_client::Peer;
+use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 /// Space kept free on both sides of the launchers, the same as between two of
@@ -123,6 +125,26 @@ impl HarnessState {
     }
 }
 
+/// How a launcher shows its name, so a crowded bar can drop it and keep the
+/// icon.
+enum LauncherName {
+    /// A logo button: the name is its own label beside the image.
+    Label(gtk4::Label),
+    /// An emoji button: the whole button text, and the emoji alone.
+    Text { full: String, short: String },
+}
+
+/// The order in which launchers lose their names when the bar is too wide:
+/// the least launched first, and among equals the one further right. The most
+/// used keep their names longest.
+pub fn collapse_order(visible: &[String], usage: &BTreeMap<String, u64>) -> Vec<String> {
+    let mut order: Vec<(usize, &String)> = visible.iter().enumerate().collect();
+    order.sort_by_key(|(index, key)| {
+        (usage.get(*key).copied().unwrap_or(0), std::cmp::Reverse(*index))
+    });
+    order.into_iter().map(|(_, key)| key.clone()).collect()
+}
+
 /// Harness buttons for one workspace, local or remote.
 pub struct HarnessBar {
     /// The launch group, centered in a top bar exactly like the local one.
@@ -146,6 +168,13 @@ pub struct HarnessBar {
     /// Bumped by every new line, so a self-dismissing notice only clears the
     /// line it put there.
     note_generation: Cell<u64>,
+    names: RefCell<HashMap<String, LauncherName>>,
+    /// Launches per harness on this PC; empty for another PC's bar.
+    usage: RefCell<BTreeMap<String, u64>>,
+    /// The width, launchers and resulting width of the last fit, so a bar
+    /// whose inputs did not change is not re-measured on every frame.
+    fitted: RefCell<Option<(i32, Vec<String>, i32)>>,
+    fit_handlers: RefCell<Option<(glib::WeakRef<gtk4::gdk::FrameClock>, Vec<glib::SignalHandlerId>)>>,
 }
 
 impl HarnessBar {
@@ -172,6 +201,7 @@ impl HarnessBar {
 
         let light_theme = crate::theme::current_theme().mode == "light";
         let mut buttons = Vec::new();
+        let mut names = HashMap::new();
         let images = Rc::new(RefCell::new(Vec::new()));
         for key in crate::tmux::HARNESS_KEYS.iter().copied() {
             let (name, emoji) = harness_label(key);
@@ -182,11 +212,15 @@ impl HarnessBar {
                 let image = gtk4::Image::from_file(&logo);
                 image.set_pixel_size(crate::brand::BRAND_ICON_SIZE);
                 row.append(&image);
-                row.append(&gtk4::Label::new(Some(name)));
+                let label = gtk4::Label::new(Some(name));
+                row.append(&label);
                 button.set_child(Some(&row));
                 images.borrow_mut().push((image, key.to_string()));
+                names.insert(key.to_string(), LauncherName::Label(label));
             } else {
-                button.set_label(&format!("{emoji} {name}"));
+                let full = format!("{emoji} {name}");
+                button.set_label(&full);
+                names.insert(key.to_string(), LauncherName::Text { full, short: emoji.to_string() });
             }
             // Built once and shown or hidden, so the layout never jumps while
             // the user is aiming at a button.
@@ -207,6 +241,10 @@ impl HarnessBar {
             busy: Cell::new(false),
             failed: Cell::new(false),
             note_generation: Cell::new(0),
+            names: RefCell::new(names),
+            usage: RefCell::new(BTreeMap::new()),
+            fitted: RefCell::new(None),
+            fit_handlers: RefCell::new(None),
         });
         for (key, button) in bar.buttons.borrow().iter() {
             let weak = Rc::downgrade(&bar);
@@ -235,10 +273,16 @@ impl HarnessBar {
                 self.group.remove(&button);
             }
             self.buttons.borrow_mut().retain(|(id, _)| id != &key);
+            self.names.borrow_mut().remove(&key);
         }
         for item in &state.custom {
+            let full = format!("{} {}", item.icon, item.name);
+            self.names.borrow_mut().insert(
+                item.id.clone(),
+                LauncherName::Text { full: full.clone(), short: item.icon.clone() },
+            );
             if let Some((_, button)) = self.buttons.borrow().iter().find(|(key, _)| key == &item.id) {
-                button.set_label(&format!("{} {}", item.icon, item.name));
+                button.set_label(&full);
                 button.set_tooltip_text(Some(&format!("Launch {}", item.name)));
                 continue;
             }
@@ -260,8 +304,132 @@ impl HarnessBar {
         for (key, button) in self.buttons.borrow().iter() {
             button.set_visible(state.keys.iter().any(|offered| offered == key));
         }
+        // Renamed custom launchers must be measured again.
+        self.fitted.replace(None);
         self.ready.set(state.ready);
         self.paint_sensitivity();
+    }
+
+    /// Launch counts by harness key, which decide whose names stay when the
+    /// bar is crowded.
+    pub fn set_usage(&self, usage: &BTreeMap<String, u64>) {
+        if *self.usage.borrow() != *usage {
+            *self.usage.borrow_mut() = usage.clone();
+            self.fitted.replace(None);
+        }
+    }
+
+    /// Fit the launchers into `available` logical pixels: with every name if
+    /// they fit, otherwise the least used show only their icon (see
+    /// [`collapse_order`]). Their tooltips still name them.
+    pub fn fit(&self, available: i32) {
+        // No allocation yet: keep the names until there is a real width.
+        if available <= 0 {
+            return;
+        }
+        let visible: Vec<String> = self.buttons.borrow().iter()
+            .filter(|(_, button)| button.is_visible())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let width = || self.group.measure(gtk4::Orientation::Horizontal, -1).1;
+        // The resulting width is part of the key, so a change of toolbar size
+        // or theme, which resizes the same buttons, is fitted again.
+        if let Some((fitted_for, fitted_keys, fitted_width)) = self.fitted.borrow().as_ref() {
+            if *fitted_for == available && *fitted_keys == visible && *fitted_width == width() {
+                return;
+            }
+        }
+        for key in &visible {
+            self.show_name(key, true);
+        }
+        for key in collapse_order(&visible, &self.usage.borrow()) {
+            if width() <= available {
+                break;
+            }
+            self.show_name(&key, false);
+        }
+        *self.fitted.borrow_mut() = Some((available, visible, width()));
+    }
+
+    /// Keep the launchers clear of `left` (the brand and the folder field) in
+    /// the top bar built by `window::top_bar_content`, on every layout of the
+    /// bar: after output, scale, window size or toolbar size changes, and when
+    /// launchers are added or removed. Event-driven like the toolbar's own
+    /// width (`window::bind_top_bar_width`): no tick callback.
+    pub fn bind_fit(self: &Rc<Self>, left: &impl IsA<gtk4::Widget>) {
+        let fit: Rc<dyn Fn()> = {
+            let bar = Rc::downgrade(self);
+            let left = left.as_ref().downgrade();
+            Rc::new(move || {
+                let (Some(bar), Some(left)) = (bar.upgrade(), left.upgrade()) else {
+                    return;
+                };
+                let Some(row) = bar.group.ancestor(gtk4::CenterBox::static_type()) else {
+                    return;
+                };
+                if row.width() <= 0 {
+                    return;
+                }
+                let left_width = if left.is_visible() {
+                    left.measure(gtk4::Orientation::Horizontal, -1).1
+                } else {
+                    0
+                };
+                // The group's measure includes its LAUNCHER_GAP margins.
+                bar.fit(row.width() - left_width);
+            })
+        };
+        let connect = {
+            let bar = Rc::downgrade(self);
+            move |group: &gtk4::Box| {
+                let Some(bar) = bar.upgrade() else { return };
+                bar.unbind_fit();
+                let Some(clock) = group.frame_clock() else { return };
+                let on_layout = Rc::clone(&fit);
+                let on_paint = Rc::clone(&fit);
+                let handlers = vec![
+                    clock.connect_layout(move |_| on_layout()),
+                    clock.connect_after_paint(move |_| on_paint()),
+                ];
+                *bar.fit_handlers.borrow_mut() = Some((clock.downgrade(), handlers));
+                fit();
+            }
+        };
+        if self.group.is_realized() {
+            connect(&self.group);
+        }
+        self.group.connect_realize(connect);
+        let bar = Rc::downgrade(self);
+        self.group.connect_unrealize(move |_| {
+            if let Some(bar) = bar.upgrade() {
+                bar.unbind_fit();
+            }
+        });
+    }
+
+    fn unbind_fit(&self) {
+        if let Some((clock, handlers)) = self.fit_handlers.borrow_mut().take() {
+            if let Some(clock) = clock.upgrade() {
+                for handler in handlers {
+                    clock.disconnect(handler);
+                }
+            }
+        }
+    }
+
+    fn show_name(&self, key: &str, shown: bool) {
+        match self.names.borrow().get(key) {
+            Some(LauncherName::Label(label)) => label.set_visible(shown),
+            Some(LauncherName::Text { full, short }) => {
+                if let Some((_, button)) = self.buttons.borrow().iter().find(|(id, _)| id == key) {
+                    let text = if shown { full } else { short };
+                    if button.label().as_deref() != Some(text.as_str()) {
+                        button.set_label(text);
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
     /// Say something under the bar, or clear it with an empty string. A launch
@@ -474,6 +642,73 @@ mod tests {
         let none = HarnessState::none();
         assert!(none.keys.is_empty() && !none.ready);
     }
+
+    #[test]
+    fn toolbar_launchers_lose_names_least_used_first() {
+        let keys: Vec<String> = ["claude", "codex", "opencode", "shell"].map(String::from).to_vec();
+        // Nothing launched yet: from the right, so the bar's first stay named.
+        assert_eq!(collapse_order(&keys, &BTreeMap::new()), ["shell", "opencode", "codex", "claude"]);
+        let usage = BTreeMap::from([("codex".to_string(), 9), ("shell".to_string(), 2)]);
+        assert_eq!(collapse_order(&keys, &usage), ["opencode", "claude", "shell", "codex"]);
+    }
+
+    #[test]
+    fn toolbar_crowded_launchers_keep_only_icons() {
+        crate::gtk_test::run_in_child_process("harness_bar::tests::crowded_inner");
+    }
+
+    #[test]
+    fn crowded_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let bar = HarnessBar::new(Rc::new(|_: &str| {}), Rc::new(|_: &gtk4::Button, _: &str| false));
+        let keys: Vec<String> = crate::tmux::HARNESS_KEYS.iter().map(|key| key.to_string()).collect();
+        bar.apply(&HarnessState {
+            keys: keys.iter().cloned().chain(["custom-a".to_string()]).collect(),
+            custom: vec![CustomButton { id: "custom-a".into(), name: "My long CLI".into(), icon: "🧭".into() }],
+            ready: true,
+        });
+        let width = || bar.group.measure(gtk4::Orientation::Horizontal, -1).1;
+        let named = |key: &str| match bar.names.borrow().get(key) {
+            Some(LauncherName::Label(label)) => label.is_visible(),
+            Some(LauncherName::Text { full, .. }) => bar.buttons().iter()
+                .any(|(id, button)| id == key && button.label().as_deref() == Some(full.as_str())),
+            None => panic!("{key} has no name"),
+        };
+        bar.fit(10_000);
+        let full = width();
+        assert!(keys.iter().all(|key| named(key)) && named("custom-a"));
+
+        bar.set_usage(&BTreeMap::from([("codex".to_string(), 5), ("shell".to_string(), 3)]));
+        bar.fit(full * 2 / 3);
+        assert!(width() <= full * 2 / 3, "the launchers must fit the space they are given");
+        // The most used keep their names; the least used, at the right end,
+        // are the first to show only their icon. Every launcher stays visible.
+        assert!(named("codex") && named("shell"));
+        assert!(!named("custom-a"));
+        assert_eq!(bar.buttons().iter().filter(|(_, button)| button.is_visible()).count(), keys.len() + 1);
+        let custom = bar.buttons().into_iter().find(|(key, _)| key == "custom-a").unwrap().1;
+        assert_eq!(custom.label().as_deref(), Some("🧭"));
+
+        // Too narrow for any name: every launcher is still there as an icon.
+        bar.fit(1);
+        assert!(keys.iter().all(|key| !named(key)));
+        // Room again, then a renamed custom launcher: the names come back.
+        bar.fit(full);
+        assert!(keys.iter().all(|key| named(key)) && named("custom-a"));
+        bar.apply(&HarnessState {
+            keys: vec!["claude".into(), "custom-a".into()],
+            custom: vec![CustomButton { id: "custom-a".into(), name: "Renamed".into(), icon: "🧭".into() }],
+            ready: true,
+        });
+        bar.fit(full);
+        assert_eq!(custom.label().as_deref(), Some("🧭 Renamed"));
+        assert!(named("claude"));
+    }
+
 
     #[test]
     fn toolbar_launchers_keep_a_gap_from_the_note_button() {

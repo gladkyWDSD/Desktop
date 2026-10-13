@@ -386,6 +386,9 @@ pub struct SuperDesktopWindow {
     /// the card goes and how big it is, and stretches the card over the whole
     /// screen once it is dropped.
     settings_layout: RefCell<Option<Rc<crate::floating_panel::MovablePanel>>>,
+    /// The local launch bar, told about every launch so the most used
+    /// harnesses keep their names when the bar is crowded.
+    harness_bar: Rc<RefCell<Option<Rc<crate::harness_bar::HarnessBar>>>>,
 }
 
 impl SuperDesktopWindow {
@@ -726,6 +729,7 @@ impl SuperDesktopWindow {
             hover_raise_lock: HoverRaiseLock::new(),
             terminal_picker: RefCell::new(None),
             settings_layout: RefCell::new(None),
+            harness_bar: Rc::clone(&harness_bar_for_settings),
         });
 
         // The overlay is OnDemand so an unfocused HUD does not eat desktop
@@ -902,6 +906,8 @@ impl SuperDesktopWindow {
             custom: win_rc.state.borrow().custom_harnesses.iter().map(Into::into).collect(),
             ready: true,
         });
+        harness_bar.set_usage(&win_rc.state.borrow().harness_launches);
+        harness_bar.bind_fit(&hud_left);
         *harness_bar_for_settings.borrow_mut() = Some(Rc::clone(&harness_bar));
         // The same brand logos the remote bar draws, so a light/dark switch
         // swaps both from the one list.
@@ -1429,6 +1435,14 @@ impl SuperDesktopWindow {
             crate::folder_colors::remember(&mut state, &workspace_dir, tag);
             tag
         };
+        let launches = {
+            let mut state = self.state.borrow_mut();
+            *state.harness_launches.entry(agent_type.to_string()).or_default() += 1;
+            state.harness_launches.clone()
+        };
+        if let Some(bar) = self.harness_bar.borrow().as_ref() {
+            bar.set_usage(&launches);
+        }
         let custom_command = self.state.borrow().custom_harnesses.iter()
             .find(|item| item.id == agent_type && item.validate().is_ok())
             .map(|item| item.command());
