@@ -24,6 +24,9 @@ pub const CARD_HEIGHT: i32 = 240;
 pub const NEW_TERM_WIDTH: i32 = 640;
 pub const NEW_TERM_HEIGHT: i32 = 480;
 pub const MIN_CARD_WIDTH: i32 = 320;
+/// Narrowest card that shows the header's "+ file" button: the header already
+/// needs about `MIN_CARD_WIDTH`, and the button adds about 50px.
+const ATTACH_MIN_CARD_WIDTH: i32 = 380;
 pub const MIN_CARD_HEIGHT: i32 = 180;
 pub const ICON_SIZE: i32 = 128;
 /// What every card's footer says when nothing more important is happening.
@@ -718,7 +721,12 @@ impl MiniTerminalCard {
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
         // File previews read this machine's own sessions, so a remote card
-        // never gets that button.
+        // never gets that button. Nor the "+ file" one: the paths it adds
+        // name files on this machine.
+        let attach_btn = (!source.is_remote()).then(crate::file_attach::button);
+        if let Some(button) = &attach_btn {
+            header.append(button);
+        }
         if !source.is_remote() {
             header.append(&crate::asset_view::button(data.borrow().session_name.clone()));
         }
@@ -745,6 +753,7 @@ impl MiniTerminalCard {
         let kill_btn = Button::with_label("✕");
         kill_btn.set_tooltip_text(Some("Kill Session"));
         kill_btn.add_css_class("term-btn");
+        kill_btn.add_css_class("term-btn-close");
 
         let sess_name = data.borrow().session_name.clone();
         let on_close_header = Rc::clone(&on_close);
@@ -1261,6 +1270,62 @@ impl MiniTerminalCard {
             }
         });
         card.header.add_controller(header_click);
+
+        // "+ file" and file drops: the chosen files' paths go into the
+        // session's prompt (see `file_attach`).
+        if let Some(button) = &attach_btn {
+            let on_files: crate::file_attach::OnFiles = {
+                let vte = Rc::clone(&card.vte);
+                let data = Rc::clone(&card.data);
+                let notice = (card.notice.clone(), card.notice_label.clone(), Rc::clone(&card.notice_generation));
+                let chrome = (card.header.clone(), card.compact.top_bar.clone());
+                Rc::new(move |paths: Vec<std::path::PathBuf>| {
+                    let text = crate::file_attach::prompt_text(&paths);
+                    let session = data.borrow().session_name.clone();
+                    let terminal = vte.borrow().clone();
+                    let result = crate::file_attach::paste(terminal.as_ref(), &session, &text);
+                    let (tone, words) = match (&result, paths.len()) {
+                        (Ok(()), 1) => (crate::command_feedback::Tone::Info, "File path added to the prompt"),
+                        (Ok(()), _) => (crate::command_feedback::Tone::Info, "File paths added to the prompt"),
+                        (Err(_), _) => (crate::command_feedback::Tone::Error, "Could not add the files to this session"),
+                    };
+                    reveal_notice(
+                        (&notice.0, &notice.1, &notice.2),
+                        (&chrome.0, &chrome.1),
+                        crate::command_feedback::Notice { text: words, tone, duration: Duration::from_secs(4) },
+                    );
+                    if let Some(terminal) = terminal {
+                        terminal.grab_focus();
+                    }
+                })
+            };
+            let data = Rc::clone(&card.data);
+            crate::file_attach::choose_on_click(
+                button,
+                move || {
+                    let dir = data.borrow().workspace_dir.clone();
+                    Some(crate::tmux::resolve_workspace_dir(dir.as_deref()).into())
+                },
+                Rc::clone(&on_files),
+            );
+            crate::file_attach::accept_drops(&card.container, on_files);
+
+            // The header was already as wide as the smallest card: on a card
+            // too narrow for the button it steps aside (drops still work)
+            // rather than widening the card past the size it was given.
+            let fit_button = {
+                let button = button.downgrade();
+                let fit = Rc::clone(&card.fit);
+                move |container: &Overlay| {
+                    let Some(button) = button.upgrade() else { return };
+                    let wanted = container.width_request();
+                    let needed = (ATTACH_MIN_CARD_WIDTH as f64 * fit.get().2.max(0.1)).round() as i32;
+                    button.set_visible(wanted < 0 || wanted >= needed);
+                }
+            };
+            fit_button(&card.container);
+            card.container.connect_notify_local(Some("width-request"), move |container, _| fit_button(container));
+        }
 
         let preview_click = GestureClick::new();
         let on_toggle_preview = Rc::clone(&card.on_toggle);
@@ -3138,6 +3203,80 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!button.is_visible(), "an icon never shows the button");
+        window.close();
+    }
+
+    #[test]
+    fn a_local_card_offers_files_on_its_header_when_wide_enough() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::attach_button_child");
+    }
+
+    #[test]
+    fn attach_button_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let data = crate::state::TerminalData {
+            id: "dw_term_attach".to_string(),
+            session_name: "dw_term_attach".to_string(),
+            agent_type: "claude".to_string(),
+            command: "claude".to_string(),
+            x: 20,
+            y: 20,
+            width: 640,
+            height: 320,
+            restored_width: 640,
+            restored_height: 320,
+            iconified: true,
+            icon_x: None,
+            icon_y: None,
+            created_at: 0.0,
+            tag: 0,
+            agent_session_id: None,
+            workspace_dir: None,
+        };
+        let card = Rc::new(MiniTerminalCard::new(
+            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        ));
+        card.open_with_bare_terminal(640, 320);
+        let window = gtk4::Window::new();
+        let canvas = gtk4::Fixed::new();
+        canvas.put(&card.container, 0.0, 0.0);
+        window.set_child(Some(&canvas));
+        window.set_default_size(800, 500);
+        window.present();
+        while glib::MainContext::default().iteration(false) {}
+
+        let mut child = card.header.first_child();
+        let mut attach = None;
+        while let Some(widget) = child {
+            if widget.has_css_class("term-attach-btn") {
+                attach = widget.clone().downcast::<Button>().ok();
+            }
+            child = widget.next_sibling();
+        }
+        let attach = attach.expect("a local card's header has the + file button");
+        assert!(attach.is_visible() && attach.is_sensitive());
+        assert!(attach.tooltip_text().is_some_and(|tip| tip.contains("drop")));
+        // It sits right before the folder (file previews) button.
+        assert!(attach.next_sibling().is_some_and(|next| next.has_css_class("image-button")));
+        // Files dropped anywhere on the card are taken.
+        let drops = card.container.observe_controllers().into_iter()
+            .filter_map(|controller| controller.ok()?.downcast::<gtk4::DropTarget>().ok())
+            .count();
+        assert_eq!(drops, 1);
+
+        // A card narrowed below what the header needs with it: the button
+        // steps aside instead of widening the card, and comes back.
+        card.container.set_size_request(340, 320);
+        assert!(!attach.is_visible());
+        while glib::MainContext::default().iteration(false) {}
+        assert!(card.container.measure(Orientation::Horizontal, -1).0 <= 340);
+        card.container.set_size_request(480, 320);
+        assert!(attach.is_visible());
         window.close();
     }
 }

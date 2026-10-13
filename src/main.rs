@@ -21,6 +21,7 @@ mod terminal_text;
 mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
+mod file_attach;
 mod bridge;
 mod card_resize;
 mod card_status;
