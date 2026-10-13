@@ -95,7 +95,7 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
     let btn_check = Button::with_label("⟳ Check again");
     btn_check.add_css_class("launcher-btn");
     btn_check.set_tooltip_text(Some("Ask GitHub for the newest version"));
-    let btn_update = Button::with_label("⬇ Update");
+    let btn_update = Button::with_label("⬇ Download latest");
     btn_update.add_css_class("launcher-btn");
     btn_update.add_css_class("launcher-btn-primary");
     btn_update.set_visible(false);
@@ -108,8 +108,8 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
     body.append(&source);
     let hint = text(&["launcher-hint"]);
     hint.set_text(
-        "Updating fast-forwards the clone COSMIC DESKTOP runs from and rebuilds it with its rebuild.sh. \
-         The build runs first, and COSMIC DESKTOP restarts on it only if it succeeds; terminal cards keep \
+        "Downloading brings the clone COSMIC DESKTOP runs from up to date with GitHub and builds it. \
+         COSMIC DESKTOP restarts on the new build only if the build succeeds; terminal cards keep \
          running. A clone with uncommitted changes or commits of its own is left alone. A copy installed \
          at a release tag stays on that version until you switch to the latest here.",
     );
@@ -156,7 +156,15 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
                         "Pinned to {tag}. COSMIC DESKTOP {} is the newest; this build is {}. Switching leaves the pinned version.",
                         checked.latest, checked.current
                     ),
-                    None => format!("COSMIC DESKTOP {} is available. This build is {}.", checked.latest, checked.current),
+                    None if checked.latest > checked.current => format!(
+                        "COSMIC DESKTOP {} is on GitHub. This build is {}.",
+                        checked.latest, checked.current
+                    ),
+                    None => format!(
+                        "A newer version is on GitHub: {} new {} not downloaded yet.",
+                        checked.behind,
+                        if checked.behind == 1 { "change" } else { "changes" }
+                    ),
                 });
                 let mut list: Vec<String> = checked.changes.iter().map(|subject| format!("• {subject}")).collect();
                 if checked.more > 0 {
@@ -168,17 +176,21 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
                 blocked.set_visible(checked.blocked.is_some());
                 btn_update.set_label(&match pinned {
                     Some(_) => format!("⬇ Switch to {}", checked.latest),
-                    None => format!("⬇ Update to {}", checked.latest),
+                    None => "⬇ Download latest".to_string(),
                 });
                 btn_update.set_visible(true);
                 btn_update.set_sensitive(checked.blocked.is_none());
-                entry_chip.set_text(&format!("{} available", checked.latest));
+                entry_chip.set_text(&if checked.latest > checked.current {
+                    format!("{} available", checked.latest)
+                } else {
+                    "Update available".to_string()
+                });
                 entry_chip.add_css_class("update-available");
             } else {
                 status.set_text(&format!(
-                    "{}Up to date. This build is {}; the newest on {} is {}.",
+                    "{}✓ Latest version already downloaded. This build is {}, the same as {} on GitHub.",
                     pinned.map(|tag| format!("Pinned to {tag}. ")).unwrap_or_default(),
-                    checked.current, checked.upstream, checked.latest
+                    checked.current, checked.upstream
                 ));
                 changes.set_visible(false);
                 blocked.set_visible(false);
@@ -219,26 +231,31 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
             button.set_sensitive(false);
             btn_check.set_sensitive(false);
             status.remove_css_class("launcher-note-error");
-            status.set_text(&format!(
-                "Updating to {}: building. This takes a minute or two, and COSMIC DESKTOP restarts on \
-                 the new build when it is ready. Terminal cards keep running.",
-                checked.latest
-            ));
+            status.set_text(
+                "Downloading the latest version and building it. This takes a minute or two, and \
+                 COSMIC DESKTOP restarts on the new build when it is ready. Terminal cards keep running.",
+            );
             let (button, btn_check, show_error, updating) =
                 (button.clone(), btn_check.clone(), show_error.clone(), Rc::clone(&updating));
+            let status_done = status.clone();
             glib::MainContext::default().spawn_local(async move {
                 let latest = checked.latest;
-                // A successful rebuild replaces this daemon before it ends,
-                // so coming back here means it did not.
+                // rebuild.sh only builds: once it succeeded, this daemon
+                // hands over to the new build itself.
                 let result = gtk4::gio::spawn_blocking(move || {
                     let paths = updates::Paths::user()?;
                     let child = updates::start_update(&checked, &paths)?;
-                    updates::wait_rebuild(child, &paths)
+                    updates::wait_rebuild(child, &paths)?;
+                    updates::restart_on_new_build(&checked.dir)
                 })
                 .await
                 .unwrap_or_else(|_| Err("the update stopped unexpectedly".to_string()));
                 updating.set(false);
                 btn_check.set_sensitive(true);
+                if result.is_ok() {
+                    status_done.set_text("Downloaded and built. Restarting on the new version…");
+                    return;
+                }
                 if let Err(reason) = result {
                     let message = format!("The update to {latest} did not finish: {reason}");
                     show_error(&message);
@@ -2825,7 +2842,7 @@ mod tests {
         assert!(status.has_css_class("launcher-note-error"));
         let update = find_buttons(&panel.widget, "launcher-btn-primary")
             .into_iter()
-            .find(|button| button.label().is_some_and(|label| label.starts_with("⬇ Update")))
+            .find(|button| button.label().is_some_and(|label| label.starts_with("⬇ Download")))
             .expect("the update button exists");
         assert!(!update.is_visible(), "nothing to update from here");
         btn_back.emit_clicked();

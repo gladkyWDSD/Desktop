@@ -1,15 +1,15 @@
 //! Settings → Updates: compare this build with its GitHub repository and
 //! update the clone it was built from.
 //!
-//! The version in Cargo.toml is raised only for a release (see AGENTS.md), so a
-//! newer version on the clone's upstream branch means a new release has reached
-//! it. A check fetches that branch, which changes no file, and reads its
-//! Cargo.toml.
-//! Updating fast-forwards the clone and starts its `rebuild.sh` in a session of
-//! its own. That script builds first and replaces this daemon only once the
-//! build succeeded, so a failed update leaves the running app alone and this
-//! process reports it. A clone with uncommitted changes or commits of its own
-//! is never updated.
+//! A check fetches the clone's upstream branch, which changes no file, and
+//! compares it with the clone: a newer version in its Cargo.toml, or commits
+//! the clone does not have yet, is something to download. Changes are pushed
+//! without raising the version, so new commits alone count.
+//! Updating fast-forwards the clone and starts its `rebuild.sh` (a build only)
+//! in a session of its own. The running app is replaced only once that build
+//! succeeded (`restart_on_new_build`), so a failed update leaves it alone and
+//! this process reports it. A clone with uncommitted changes or commits of its
+//! own is never updated.
 //!
 //! A clone pinned to a release tag (`vX.Y.Z`, a detached HEAD, see the README's
 //! "Installing a specific version") is checked against `origin/master`; its
@@ -174,6 +174,8 @@ pub struct Status {
     /// `MAX_CHANGES`; `more` counts the rest.
     pub changes: Vec<String>,
     pub more: usize,
+    /// Commits on the upstream branch that this clone has not downloaded.
+    pub behind: usize,
     /// Why this clone cannot be updated as it is, if it cannot.
     pub blocked: Option<String>,
     /// The release tag this clone is pinned to (a detached HEAD exactly on a
@@ -182,14 +184,16 @@ pub struct Status {
 }
 
 impl Status {
+    /// GitHub has something this clone does not: a newer version, or new
+    /// commits under the same version.
     pub fn available(&self) -> bool {
-        self.latest > self.current
+        self.latest > self.current || self.behind > 0
     }
 }
 
 /// Check the clone this daemon runs from.
 pub fn check() -> Result<Status, String> {
-    Err("Automatic updates are disabled in this standalone checkout.".into())
+    check_clone(&this_clone()?, running())
 }
 
 /// The release tag `dir` is pinned to: HEAD is detached exactly on a `vX.Y.Z` tag.
@@ -226,7 +230,8 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
         .ok_or_else(|| format!("Cargo.toml on {upstream} names no version."))?;
     let subjects = run(dir, &["log", "--format=%s", &format!("HEAD..{upstream}")]).unwrap_or_default();
     let subjects: Vec<String> = subjects.lines().map(str::to_string).collect();
-    let more = subjects.len().saturating_sub(MAX_CHANGES);
+    let behind = subjects.len();
+    let more = behind.saturating_sub(MAX_CHANGES);
     Ok(Status {
         current,
         latest,
@@ -237,6 +242,7 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
         dir: dir.to_path_buf(),
         changes: subjects.into_iter().take(MAX_CHANGES).collect(),
         more,
+        behind,
     })
 }
 
@@ -335,6 +341,35 @@ pub fn wait_rebuild(mut child: Child, paths: &Paths) -> Result<(), String> {
         .trim()
         .to_string();
     Err(format!("{reason} (full log: {})", paths.log.display()))
+}
+
+/// After a successful update build: stop this daemon and start the new build
+/// in its place, from a helper in a session of its own (the daemon cannot
+/// outlive its own restart). Terminal cards keep running in tmux and are
+/// picked up again by the new daemon.
+pub fn restart_on_new_build(dir: &Path) -> Result<(), String> {
+    let binary = dir.join("target/release/desktop-workspace");
+    let launcher = dir.join("bin/desktop-workspace");
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", r#"sleep 1; "$1" kill >/dev/null 2>&1; sleep 1; exec "$2" daemon"#, "restart"])
+        .arg(&binary)
+        .arg(&launcher)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    // SAFETY: setsid is async-signal-safe and touches no memory of this process.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command.spawn().map(|_| ()).map_err(|error| format!("Cannot restart on the new build: {error}"))
 }
 
 /// What the daemon started after an update says about it: `None` when this
@@ -539,6 +574,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(installed.join("built")).unwrap().trim(), "built");
         assert!(std::fs::read_to_string(&paths.log).unwrap().contains("building"));
         assert!(!check_clone(&installed, Version(1, 1, 2)).unwrap().available());
+    }
+
+    #[test]
+    fn new_commits_without_a_new_version_are_offered_until_downloaded() {
+        let scratch = Scratch::new("commits");
+        let (author, installed) = repositories(&scratch);
+        let current = Version(1, 1, 0);
+        let status = check_clone(&installed, current).unwrap();
+        assert!(!status.available() && status.behind == 0, "nothing new yet: {status:?}");
+
+        // Pushed without raising the version: still something to download.
+        std::fs::write(author.join("CHANGES"), "phone app\n").unwrap();
+        test_git(&author, &["add", "CHANGES"]);
+        test_git(&author, &["commit", "--quiet", "-m", "Add a phone app"]);
+        test_git(&author, &["push", "--quiet", "origin", "master"]);
+        let status = check_clone(&installed, current).unwrap();
+        assert_eq!(status.latest, current);
+        assert_eq!(status.behind, 1);
+        assert!(status.available());
+        assert_eq!(status.changes, ["Add a phone app"]);
+
+        // Downloaded: nothing is offered any more.
+        let paths = Paths { log: scratch.0.join("state/update.log"), pending: scratch.0.join("state/update-pending") };
+        let child = start_update(&status, &paths).unwrap();
+        assert_eq!(wait_rebuild(child, &paths), Ok(()));
+        let status = check_clone(&installed, current).unwrap();
+        assert!(!status.available() && status.behind == 0, "{status:?}");
     }
 
     #[test]
