@@ -162,7 +162,16 @@ public final class SessionActivity extends Activity {
                     else socket = opened;
                 });
             } catch (Exception e) {
+                // The address in use stopped answering: move to another of the
+                // PC's addresses (LAN ↔ Tailscale) before the next attempt.
+                Bridge moved = Bridge.unreachable(e) ? bridge.reachable() : null;
                 runOnUiThread(() -> {
+                    if (moved != null && !moved.host.equalsIgnoreCase(bridge.host)) {
+                        bridge = moved;
+                        Ui.saveBridge(this, moved);
+                        main.postDelayed(this::connect, 200);
+                        return;
+                    }
                     state.setText(Ui.explain(e));
                     boolean gone = e instanceof Bridge.BridgeException && ((Bridge.BridgeException) e).status == 404;
                     if (gone) ended = true;

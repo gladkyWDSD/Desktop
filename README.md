@@ -19,6 +19,23 @@ pairings. Connections work over LAN or Tailscale through **Settings →
 Connections** on port **8760**, so the installed bridge can keep port 8759.
 Automatic updates remain disabled for this standalone checkout.
 
+### Phone app
+
+`android/` holds the phone app for this build. `android/build.sh` builds and
+signs `android/build/desktop-workspace.apk` with the Android SDK's own tools
+(no Gradle); `android/build.sh install` also installs it over `adb`. Pair it
+from **Settings → Connections → Add a device → Pair a phone**: scan the QR
+code, or paste the link into the app.
+
+To use the phone away from the PC's network, run Tailscale on both devices.
+When pairing from elsewhere, enter the PC's Tailscale address (`100.x.y.z` or
+its `*.ts.net` name, shown in **Settings → Connections**) in the app's
+**PC address** field. Once paired, the app learns the PC's LAN and Tailscale
+addresses and switches between them on its own when one stops answering. The
+session list says which one is in use (`connected via Tailscale`). Set an
+address by hand from **⋯ → PC address**. Every address is checked against the
+same pinned certificate, so the app only ever talks to the PC it paired with.
+
 The documentation below is inherited from the upstream application; its
 installation, update, and shortcut instructions do not apply to this
 standalone build. Use the commands above.

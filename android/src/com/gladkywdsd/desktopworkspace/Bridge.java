@@ -12,7 +12,11 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
@@ -20,6 +24,7 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -28,25 +33,104 @@ import org.json.JSONObject;
  * by the SHA-256 fingerprint from its pairing QR code, and a bearer token once
  * the PC's owner has approved this phone.
  *
+ * <p>A PC can be reached at more than one address: its LAN address at home,
+ * its Tailscale address (100.x.y.z or a {@code *.ts.net} name) from anywhere.
+ * {@link #alternates} keeps the others; {@link #reachable} moves to whichever
+ * answers. The certificate pin is the same for all of them, so an address only
+ * ever reaches this PC.
+ *
  * No Android classes here, so the same code is exercised on a desktop JVM.
  */
 public final class Bridge {
+    /** Addresses kept besides the one in use. */
+    static final int MAX_ALTERNATES = 6;
+    /** A quick reachability check: an address that does not answer this fast is skipped. */
+    static final int PROBE_TIMEOUT_MS = 3000;
+
     public final String host;
     public final int port;
     public final String fingerprint;
+    /** Other addresses of the same PC, best first. Never contains {@link #host}. */
+    public final List<String> alternates;
     private final String token;
     private final SSLSocketFactory sockets;
 
     public Bridge(String host, int port, String fingerprint, String token) {
-        this.host = host;
+        this(host, port, fingerprint, token, Collections.<String>emptyList());
+    }
+
+    public Bridge(String host, int port, String fingerprint, String token, List<String> alternates) {
+        this.host = host.trim();
         this.port = port;
-        this.fingerprint = fingerprint.toLowerCase();
+        this.fingerprint = fingerprint.toLowerCase(Locale.ROOT);
         this.token = token;
+        this.alternates = Collections.unmodifiableList(merge(this.host, alternates, Collections.<String>emptyList()));
         this.sockets = pinned(this.fingerprint);
     }
 
     public Bridge withToken(String newToken) {
-        return new Bridge(host, port, fingerprint, newToken);
+        return new Bridge(host, port, fingerprint, newToken, alternates);
+    }
+
+    /** The same PC at another address; the old one becomes the first alternate. */
+    public Bridge withHost(String newHost) {
+        List<String> others = new ArrayList<>();
+        others.add(host);
+        others.addAll(alternates);
+        return new Bridge(newHost, port, fingerprint, token, others);
+    }
+
+    /** The same PC, also known at {@code more} (added after the known ones). */
+    public Bridge withAlternates(List<String> more) {
+        return new Bridge(host, port, fingerprint, token, merge(host, alternates, more));
+    }
+
+    /** {@code first} then {@code then}: trimmed, without blanks, duplicates, loopback or {@code host}. */
+    static List<String> merge(String host, List<String> first, List<String> then) {
+        List<String> out = new ArrayList<>();
+        List<String> all = new ArrayList<>(first);
+        all.addAll(then);
+        for (String candidate : all) {
+            if (candidate == null) continue;
+            String h = candidate.trim();
+            if (h.isEmpty() || h.equalsIgnoreCase(host) || isLoopback(h)) continue;
+            boolean seen = false;
+            for (String o : out) seen |= o.equalsIgnoreCase(h);
+            if (!seen && out.size() < MAX_ALTERNATES) out.add(h);
+        }
+        return out;
+    }
+
+    static boolean isLoopback(String host) {
+        return host.startsWith("127.") || host.equals("::1") || host.equalsIgnoreCase("localhost");
+    }
+
+    /** Tailscale's 100.64.0.0/10 and fd7a:115c:a1e0::/48, or a MagicDNS name. */
+    public static boolean isTailscale(String host) {
+        String h = host.trim().toLowerCase(Locale.ROOT);
+        if (h.endsWith(".ts.net") || h.endsWith(".ts.net.")) return true;
+        if (h.startsWith("fd7a:115c:a1e0:")) return true;
+        String[] parts = h.split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            int a = Integer.parseInt(parts[0]);
+            int b = Integer.parseInt(parts[1]);
+            return a == 100 && b >= 64 && b <= 127;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** "Tailscale" or "LAN": how {@link #host} reaches the PC. */
+    public String route() {
+        return isTailscale(host) ? "Tailscale" : "LAN";
+    }
+
+    /** Whether a failure means the address did not answer, rather than the PC refusing. */
+    public static boolean unreachable(Exception e) {
+        if (e instanceof BridgeException) return false;
+        String message = e.getMessage();
+        return !(message != null && message.contains("certificate_mismatch"));
     }
 
     /** A refused request, with the bridge's own error code when it sent one. */
@@ -162,12 +246,16 @@ public final class Bridge {
 
     /** One JSON request. Throws {@link BridgeException} for an error status. */
     public JSONObject request(String method, String path, JSONObject body) throws IOException {
+        return request(method, path, body, 8000, 20000);
+    }
+
+    JSONObject request(String method, String path, JSONObject body, int connectMs, int readMs) throws IOException {
         HttpsURLConnection conn = (HttpsURLConnection) new URL("https://" + hostForUrl() + ":" + port + path).openConnection();
         conn.setSSLSocketFactory(sockets);
         // The certificate is pinned above; its name is never meaningful.
         conn.setHostnameVerifier((name, session) -> true);
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(20000);
+        conn.setConnectTimeout(connectMs);
+        conn.setReadTimeout(readMs);
         conn.setRequestMethod(method);
         conn.setRequestProperty("Accept", "application/json");
         if (token != null) conn.setRequestProperty("Authorization", "Bearer " + token);
@@ -200,6 +288,70 @@ public final class Bridge {
         while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         in.close();
         return out.toString("UTF-8");
+    }
+
+    // ---- addresses ----
+
+    /**
+     * {@code GET /api/v1/ping}: the bridge's own description, including the
+     * addresses it listens on ({@code lanIp}, {@code tailscaleIp}). Needs no
+     * token, and the pinned certificate proves it is this PC.
+     */
+    public JSONObject ping(int timeoutMs) throws IOException {
+        return withToken(null).request("GET", "/api/v1/ping", null, timeoutMs, timeoutMs);
+    }
+
+    /** The addresses a ping names, Tailscale first: they work away from home. */
+    static List<String> advertised(JSONObject ping) {
+        List<String> out = new ArrayList<>();
+        String tailscale = ping.optString("tailscaleIp", "");
+        if (!tailscale.isEmpty() && !"null".equals(tailscale)) out.add(tailscale);
+        JSONArray addresses = ping.optJSONArray("addresses");
+        for (int i = 0; addresses != null && i < addresses.length(); i++) {
+            JSONObject a = addresses.optJSONObject(i);
+            if (a != null && a.optBoolean("connectable") && "tailscale".equals(a.optString("kind"))) {
+                out.add(a.optString("address"));
+            }
+        }
+        String lan = ping.optString("lanIp", "");
+        if (!lan.isEmpty() && !"null".equals(lan)) out.add(lan);
+        for (int i = 0; addresses != null && i < addresses.length(); i++) {
+            JSONObject a = addresses.optJSONObject(i);
+            if (a != null && a.optBoolean("connectable") && "lan".equals(a.optString("kind"))) {
+                out.add(a.optString("address"));
+            }
+        }
+        return out;
+    }
+
+    /** This bridge, also knowing every address the PC advertises. Unchanged if the ping fails. */
+    public Bridge learnAddresses() {
+        try {
+            return withAlternates(advertised(ping(PROBE_TIMEOUT_MS)));
+        } catch (Exception e) {
+            return this;
+        }
+    }
+
+    /**
+     * The first of {@link #host} and {@link #alternates} that answers, as the
+     * bridge to use from now on, or {@code null} when none does (the phone is
+     * offline, or Tailscale is off on one side).
+     */
+    public Bridge reachable() {
+        List<String> candidates = new ArrayList<>();
+        candidates.add(host);
+        candidates.addAll(alternates);
+        for (String candidate : candidates) {
+            Bridge b = candidate.equalsIgnoreCase(host) ? this : withHost(candidate);
+            try {
+                JSONObject ping = b.ping(PROBE_TIMEOUT_MS);
+                return b.withAlternates(advertised(ping));
+            } catch (Exception ignored) {
+                // Try the next address.
+            }
+        }
+        return null;
     }
 
     // ---- pairing ----
@@ -284,6 +436,7 @@ public final class Bridge {
             o.put("port", port);
             o.put("fingerprint", fingerprint);
             o.put("token", token);
+            o.put("alternates", new JSONArray(alternates));
         } catch (JSONException e) {
             throw new IllegalStateException(e);
         }
@@ -294,7 +447,11 @@ public final class Bridge {
         if (text == null || text.isEmpty()) return null;
         try {
             JSONObject o = new JSONObject(text);
-            return new Bridge(o.getString("host"), o.getInt("port"), o.getString("fingerprint"), o.optString("token", null));
+            List<String> alternates = new ArrayList<>();
+            JSONArray a = o.optJSONArray("alternates");
+            for (int i = 0; a != null && i < a.length(); i++) alternates.add(a.optString(i));
+            return new Bridge(o.getString("host"), o.getInt("port"), o.getString("fingerprint"),
+                    o.has("token") && !o.isNull("token") ? o.getString("token") : null, alternates);
         } catch (JSONException e) {
             return null;
         }

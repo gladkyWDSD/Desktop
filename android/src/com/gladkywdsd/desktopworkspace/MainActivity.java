@@ -39,6 +39,10 @@ public final class MainActivity extends Activity {
     private TextView status;
     private boolean resumed;
     private boolean pairing;
+    /** A session list request is out: the 2 s refresh must not stack them while an address times out. */
+    private boolean loading;
+    /** Addresses were learned from the PC since the app started. */
+    private boolean learned;
 
     private final Runnable refresh = new Runnable() {
         @Override
@@ -83,7 +87,7 @@ public final class MainActivity extends Activity {
     private boolean handleLink(Intent intent) {
         Uri data = intent == null ? null : intent.getData();
         if (data == null || !"pair".equals(data.getHost())) return false;
-        startPairing(data.toString());
+        startPairing(data.toString(), null);
         return true;
     }
 
@@ -120,6 +124,19 @@ public final class MainActivity extends Activity {
         link.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         root.addView(link, new LinearLayout.LayoutParams(-1, -2));
 
+        TextView away = Ui.text(this,
+                "Not on the PC's network? Connect both devices to Tailscale and enter the PC's Tailscale "
+                        + "address (100.x.y.z or name.ts.net), shown on the PC in Connections.", 13, Ui.MUTED);
+        away.setPadding(0, Ui.dp(this, 14), 0, Ui.dp(this, 4));
+        root.addView(away);
+        EditText address = new EditText(this);
+        address.setHint("PC address (optional)");
+        address.setHintTextColor(Ui.MUTED);
+        address.setTextColor(Ui.TEXT);
+        address.setSingleLine(true);
+        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        root.addView(address, new LinearLayout.LayoutParams(-1, -2));
+
         LinearLayout buttons = new LinearLayout(this);
         buttons.setPadding(0, Ui.dp(this, 10), 0, 0);
         View paste = Ui.button(this, "Paste", Ui.CARD);
@@ -132,7 +149,7 @@ public final class MainActivity extends Activity {
             }
         });
         View pair = Ui.button(this, "Pair", Ui.ACCENT);
-        pair.setOnClickListener(v -> startPairing(link.getText().toString()));
+        pair.setOnClickListener(v -> startPairing(link.getText().toString(), address.getText().toString()));
         LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1);
         half.setMargins(0, 0, Ui.dp(this, 8), 0);
         buttons.addView(paste, half);
@@ -145,7 +162,12 @@ public final class MainActivity extends Activity {
         setContentView(root);
     }
 
-    private void startPairing(String linkText) {
+    /**
+     * {@code address}, when given, is where the phone reaches the PC (its
+     * Tailscale address, typically); the address in the link is kept as an
+     * alternate for when the phone is back on the PC's network.
+     */
+    private void startPairing(String linkText, String address) {
         final Bridge.Invitation invitation;
         try {
             invitation = Bridge.Invitation.parse(linkText);
@@ -159,7 +181,11 @@ public final class MainActivity extends Activity {
         TextView code = Ui.text(this, "", 40, Ui.ACCENT);
         code.setGravity(Gravity.CENTER);
         code.setPadding(0, Ui.dp(this, 30), 0, Ui.dp(this, 10));
-        TextView info = Ui.text(this, "Connecting to " + invitation.host + "…", 15, Ui.MUTED);
+        String override = address == null ? "" : address.trim();
+        Bridge unpaired = new Bridge(invitation.host, invitation.port, invitation.fingerprint, null);
+        if (!override.isEmpty() && !override.equalsIgnoreCase(invitation.host)) unpaired = unpaired.withHost(override);
+        final Bridge target = unpaired;
+        TextView info = Ui.text(this, "Connecting to " + target.host + "…", 15, Ui.MUTED);
         info.setGravity(Gravity.CENTER);
         root.addView(code);
         root.addView(info);
@@ -171,11 +197,14 @@ public final class MainActivity extends Activity {
         root.addView(cancel, lp);
         setContentView(root);
 
-        Bridge unpaired = new Bridge(invitation.host, invitation.port, invitation.fingerprint, null);
         String name = Build.MANUFACTURER + " " + Build.MODEL;
         Ui.IO.execute(() -> {
             try {
-                JSONObject request = unpaired.requestPairing(invitation, name, Ui.deviceId(this));
+                // The address in the link may be unreachable from here (a LAN
+                // address while away): try every address the phone knows.
+                Bridge reached = target.reachable();
+                Bridge unpairedHere = reached == null ? target : reached;
+                JSONObject request = unpairedHere.requestPairing(invitation, name, Ui.deviceId(this));
                 String requestId = request.getString("requestId");
                 runOnUiThread(() -> {
                     code.setText(request.optString("code"));
@@ -184,10 +213,10 @@ public final class MainActivity extends Activity {
                 long until = System.currentTimeMillis() + request.optLong("expiresIn", 120) * 1000;
                 while (pairing && System.currentTimeMillis() < until) {
                     Thread.sleep(1500);
-                    JSONObject poll = unpaired.pollPairing(requestId);
+                    JSONObject poll = unpairedHere.pollPairing(requestId);
                     String state = poll.optString("status");
                     if ("paired".equals(state)) {
-                        Bridge paired = unpaired.withToken(poll.getString("token"));
+                        Bridge paired = unpairedHere.withToken(poll.getString("token")).learnAddresses();
                         runOnUiThread(() -> {
                             pairing = false;
                             bridge = paired;
@@ -243,34 +272,130 @@ public final class MainActivity extends Activity {
 
     private void showMenu() {
         new AlertDialog.Builder(this)
-                .setTitle(bridge.host + ":" + bridge.port)
-                .setItems(new String[] {"Unpair this phone"}, (d, which) -> new AlertDialog.Builder(this)
-                        .setMessage("Forget this PC? You will need a new pairing code to connect again.")
-                        .setPositiveButton("Unpair", (d2, w2) -> {
-                            bridge = null;
-                            Ui.saveBridge(this, null);
-                            showPairing(null);
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show())
+                .setTitle(bridge.host + ":" + bridge.port + " · " + bridge.route())
+                .setItems(new String[] {"PC address…", "Unpair this phone"}, (d, which) -> {
+                    if (which == 0) {
+                        chooseAddress();
+                        return;
+                    }
+                    new AlertDialog.Builder(this)
+                            .setMessage("Forget this PC? You will need a new pairing code to connect again.")
+                            .setPositiveButton("Unpair", (d2, w2) -> {
+                                bridge = null;
+                                Ui.saveBridge(this, null);
+                                showPairing(null);
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                })
                 .show();
     }
 
-    private void loadSessions() {
+    /** Pick one of the PC's known addresses, or enter one (its Tailscale address, say). */
+    private void chooseAddress() {
+        List<String> known = new ArrayList<>();
+        known.add(bridge.host);
+        known.addAll(bridge.alternates);
+        List<String> labels = new ArrayList<>();
+        for (String h : known) {
+            String kind = Bridge.isTailscale(h) ? "Tailscale" : "LAN";
+            labels.add(h + " · " + kind + (h.equals(bridge.host) ? " · in use" : ""));
+        }
+        labels.add("Enter an address…");
+        new AlertDialog.Builder(this)
+                .setTitle("PC address")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    if (which < known.size()) useAddress(known.get(which));
+                    else enterAddress();
+                })
+                .show();
+    }
+
+    private void enterAddress() {
+        EditText field = new EditText(this);
+        field.setHint("100.x.y.z or name.ts.net");
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        int pad = Ui.dp(this, 20);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(pad, Ui.dp(this, 8), pad, 0);
+        box.addView(field, new LinearLayout.LayoutParams(-1, -2));
+        new AlertDialog.Builder(this)
+                .setTitle("PC address")
+                .setMessage("The PC's Tailscale address is in Desktop Workspace → ⚙ Settings → Connections on the PC.")
+                .setView(box)
+                .setPositiveButton("Connect", (d, w) -> {
+                    String h = field.getText().toString().trim();
+                    if (!h.isEmpty()) useAddress(h);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Switch to {@code host} once the PC answers there; keep the current address if not. */
+    private void useAddress(String host) {
         Bridge current = bridge;
+        Bridge candidate = host.equalsIgnoreCase(current.host) ? current : current.withHost(host);
+        Ui.toast(this, "Connecting to " + host + "…");
         Ui.IO.execute(() -> {
             try {
-                JSONArray sessions = current.harnesses().optJSONArray("harnesses");
+                Bridge answered = candidate.withAlternates(Bridge.advertised(candidate.ping(Bridge.PROBE_TIMEOUT_MS * 2)));
                 runOnUiThread(() -> {
+                    if (current != bridge) return;
+                    bridge = answered;
+                    Ui.saveBridge(this, answered);
+                    if (status != null) status.setText(answered.host + " · connected via " + answered.route());
+                    loadSessions();
+                });
+            } catch (Exception e) {
+                Ui.toast(this, "The PC did not answer at " + host + ". " + Ui.explain(e));
+            }
+        });
+    }
+
+    private void loadSessions() {
+        if (loading || bridge == null) return;
+        loading = true;
+        Bridge current = bridge;
+        boolean learn = !learned;
+        Ui.IO.execute(() -> {
+            Bridge using = current;
+            try {
+                JSONArray sessions;
+                try {
+                    sessions = using.harnesses().optJSONArray("harnesses");
+                } catch (Exception e) {
+                    // The address in use stopped answering (left home Wi-Fi,
+                    // Tailscale turned off): try the PC's other addresses.
+                    if (!Bridge.unreachable(e)) throw e;
+                    Bridge moved = using.reachable();
+                    if (moved == null || moved.host.equalsIgnoreCase(using.host)) throw e;
+                    using = moved;
+                    sessions = using.harnesses().optJSONArray("harnesses");
+                }
+                if (learn) using = using.learnAddresses();
+                Bridge working = using;
+                JSONArray found = sessions;
+                runOnUiThread(() -> {
+                    loading = false;
                     if (current != bridge || list == null) return;
-                    status.setText(current.host + " · connected");
+                    learned = true;
+                    if (working != current) {
+                        bridge = working;
+                        Ui.saveBridge(this, working);
+                    }
+                    status.setText(working.host + " · connected via " + working.route());
                     status.setTextColor(Ui.MUTED);
-                    renderSessions(sessions == null ? new JSONArray() : sessions);
+                    renderSessions(found == null ? new JSONArray() : found);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
+                    loading = false;
                     if (current != bridge || status == null) return;
-                    status.setText(Ui.explain(e));
+                    String hint = Bridge.unreachable(e) && current.alternates.isEmpty() && !Bridge.isTailscale(current.host)
+                            ? "\nAway from home? Set the PC's Tailscale address in ⋯ → PC address."
+                            : "";
+                    status.setText(Ui.explain(e) + hint);
                     status.setTextColor(Ui.DANGER);
                 });
             }

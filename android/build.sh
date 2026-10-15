@@ -17,8 +17,8 @@ BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
 PLATFORM="$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)/android.jar"
 JDK="${JAVA_HOME:-$HOME/.local/opt/neural-tycoon-toolchain/jdk-17}"
 KEYSTORE="${DW_KEYSTORE:-$HOME/.android/desktop-workspace.keystore}"
-VERSION_CODE=1
-VERSION_NAME=0.1.0
+VERSION_CODE=2
+VERSION_NAME=0.2.0
 
 rm -rf build
 mkdir -p build/gen build/classes build/dex
