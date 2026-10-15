@@ -55,6 +55,21 @@ const HUD_MIN_HEIGHT: i32 = 56;
 /// report rest, so this unmaps on time either way.
 pub(crate) const HIDE_FALLBACK: Duration = Duration::from_millis(280);
 
+/// Said on a card that ⑂ started in a new worktree.
+const WORKTREE_CREATED: crate::command_feedback::Notice = crate::command_feedback::Notice {
+    text: "⑂ Started in a new git worktree on its own branch",
+    tone: crate::command_feedback::Tone::Info,
+    duration: Duration::from_secs(5),
+};
+
+/// Said on a card ⑂ could not give a worktree (not a repository, no commit
+/// yet, git refused): it runs in the folder itself.
+const WORKTREE_SKIPPED: crate::command_feedback::Notice = crate::command_feedback::Notice {
+    text: "⑂ No git worktree here · started in the folder",
+    tone: crate::command_feedback::Tone::Warning,
+    duration: Duration::from_secs(6),
+};
+
 thread_local! {
     static DOCK_POSES: RefCell<Vec<(glib::WeakRef<gtk4::Box>, (i32, i32))>> = RefCell::new(Vec::new());
     /// From the start of a hide until the next show, the overlay's keyboard
@@ -1446,6 +1461,26 @@ impl SuperDesktopWindow {
         let custom_command = self.state.borrow().custom_harnesses.iter()
             .find(|item| item.id == agent_type && item.validate().is_ok())
             .map(|item| item.command());
+        // ⑂ in the top bar: a harness launched here (not one a phone or
+        // another PC asked for in a named folder) works in its own worktree.
+        // The folder history and colour stay the project's; only the card moves.
+        let mut worktree_notice = None;
+        let session_dir = if directory.is_none() && self.state.borrow().new_worktree {
+            match crate::git_worktree::create_for_card(&workspace_dir, agent_type) {
+                Ok(dir) => {
+                    worktree_notice = Some(WORKTREE_CREATED);
+                    dir
+                }
+                Err(error) => {
+                    eprintln!("COSMIC DESKTOP: no worktree for {workspace_dir}: {error}");
+                    worktree_notice = Some(WORKTREE_SKIPPED);
+                    workspace_dir.clone()
+                }
+            }
+        } else {
+            workspace_dir.clone()
+        };
+        let workspace_dir = session_dir;
         let (sess, cmd_run) = create_session(agent_type, custom_command.as_deref().or(cmd), Some(&workspace_dir));
         let idx = self.terminal_cards.borrow().len();
 
@@ -1487,6 +1522,13 @@ impl SuperDesktopWindow {
         };
 
         self.spawn_terminal_widget(data, true, None, None);
+        if let Some(notice) = worktree_notice {
+            let card = self.terminal_cards.borrow().iter()
+                .find(|card| card.data.borrow().session_name == sess).cloned();
+            if let Some(card) = card {
+                card.show_notice(notice);
+            }
+        }
         sess
     }
 
@@ -2096,6 +2138,15 @@ impl SuperDesktopWindow {
 
     pub fn item_counts(&self) -> (usize, usize) {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
+    }
+
+    /// Raise and focus the local card running `session`, as Alt+digit does.
+    pub fn select_terminal(&self, session: &str) {
+        let card = self.terminal_cards.borrow().iter()
+            .find(|card| card.data.borrow().session_name == session).cloned();
+        if let Some(card) = card {
+            card.select_with_keyboard();
+        }
     }
 
     pub fn close_terminal(&self, sess: &str) -> bool {

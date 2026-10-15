@@ -308,6 +308,12 @@ entry.ws-entry.ws-entry-invalid {{
     color: {bright_foreground};
 }}
 
+/* ⑂ on: new harnesses get their own git worktree. */
+.ws-worktree-btn:checked {{
+    background-color: alpha({accent}, 0.18);
+    color: {accent};
+}}
+
 .ws-resize-handle {{
     color: {dark_foreground};
     min-width: 10px;
@@ -847,6 +853,18 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     color: {bright_foreground};
     font-weight: 700;
     font-size: 12px;
+}}
+
+/* ⑂ branch · changed files of the checkout the card runs in. */
+.term-git-badge {{
+    color: {dark_foreground};
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 4px;
+}}
+
+.term-git-badge.git-dirty {{
+    color: {accent};
 }}
 
 .term-status-badge {{
@@ -1945,6 +1963,8 @@ mod tests {
             "ws-entry",
             "ws-entry-invalid",
             "ws-menu-btn",
+            "ws-worktree-btn",
+            "term-git-badge",
             "ws-pop",
             "ws-pop-box",
             "ws-row-pick",

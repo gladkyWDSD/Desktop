@@ -178,6 +178,18 @@ pub struct AppState {
     /// keep theirs longest (see `harness_bar::collapse_order`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub harness_launches: std::collections::BTreeMap<String, u64>,
+    /// Start each new harness in a git repository in its own worktree on a new
+    /// branch (the top bar's ⑂ toggle, see `git_worktree`). Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_worktree: bool,
+    /// Show a desktop notification when a harness finishes a turn while the
+    /// overlay is hidden (see `finish_notify`). On by default.
+    #[serde(default = "default_true")]
+    pub finish_notifications: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppState {
@@ -211,6 +223,8 @@ impl Default for AppState {
             settings_panel_pos: None,
             settings_panel_size: None,
             harness_launches: std::collections::BTreeMap::new(),
+            new_worktree: false,
+            finish_notifications: true,
         }
     }
 }
@@ -698,6 +712,20 @@ mod tests {
         };
         assert!(retire_harnesses(&mut state, |_| true));
         assert_eq!(state.visible_harnesses.as_deref().unwrap(), ["antigravity"]);
+    }
+
+    #[test]
+    fn older_state_files_keep_worktrees_off_and_finish_notifications_on() {
+        let mut value = serde_json::to_value(AppState::default()).unwrap();
+        value.as_object_mut().unwrap().remove("new_worktree");
+        value.as_object_mut().unwrap().remove("finish_notifications");
+        let state: AppState = serde_json::from_value(value).unwrap();
+        assert!(!state.new_worktree);
+        assert!(state.finish_notifications);
+        let state = AppState { new_worktree: true, finish_notifications: false, ..AppState::default() };
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(saved.new_worktree);
+        assert!(!saved.finish_notifications);
     }
 
     #[test]

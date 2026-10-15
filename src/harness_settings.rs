@@ -1219,6 +1219,36 @@ pub fn build_harness_settings_panel(
     missing_rows.add_css_class("harness-rows");
     missing_body.append(&missing_rows);
 
+    let (_, notify_body) = section_card(&harnesses_root, "", "When a harness finishes");
+    let notify_row = Box::new(Orientation::Horizontal, 12);
+    let notify_label = Label::new(Some("Desktop notification while the workspace is hidden"));
+    notify_label.set_hexpand(true);
+    notify_label.set_xalign(0.0);
+    notify_label.set_wrap(true);
+    let notify_toggle = gtk4::Switch::new();
+    notify_toggle.add_css_class("finish-notify-toggle");
+    notify_toggle.set_valign(Align::Center);
+    notify_toggle.set_active(state.borrow().finish_notifications);
+    notify_row.append(&notify_label);
+    notify_row.append(&notify_toggle);
+    notify_body.append(&notify_row);
+    let notify_help = Label::new(Some(
+        "Claude, Codex, OpenCode and Pi report when a turn is done. Show in the notification opens the workspace on that card.",
+    ));
+    notify_help.add_css_class("launcher-hint");
+    notify_help.set_xalign(0.0);
+    notify_help.set_wrap(true);
+    notify_body.append(&notify_help);
+    notify_toggle.connect_active_notify({
+        let state = Rc::clone(&state);
+        move |toggle| {
+            let enabled = toggle.is_active();
+            state.borrow_mut().finish_notifications = enabled;
+            crate::state::save_state_async(state.borrow().clone());
+            crate::finish_notify::set_enabled(enabled);
+        }
+    });
+
     let footer = Label::new(Some(
         "Built-ins detected from PATH and common user bin folders · custom launchers stored in state.json",
     ));

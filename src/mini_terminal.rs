@@ -486,6 +486,9 @@ pub struct MiniTerminalCard {
     /// forever and keeps showing that console's prompt in this card's title.
     oc_recheck_at: Rc<RefCell<std::time::Instant>>,
     status_badge: Label,
+    /// ⑂ branch · changed files of the folder the session runs in; hidden
+    /// outside a git repository and on remote cards.
+    git_badge: Label,
     refresh_in_flight: Rc<Cell<bool>>,
     preview_label: Label,
     /// Everything the card draws while iconified.
@@ -714,6 +717,14 @@ impl MiniTerminalCard {
         title.set_hexpand(true);
         title.set_halign(Align::Start);
         header.append(&title);
+
+        let git_badge = Label::new(None);
+        git_badge.add_css_class("term-git-badge");
+        git_badge.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        git_badge.set_max_width_chars(GIT_BADGE_MAX_CHARS);
+        git_badge.set_single_line_mode(true);
+        git_badge.set_visible(false);
+        header.append(&git_badge);
 
         let status_badge = Label::new(Some("● IDLE"));
         status_badge.add_css_class("term-status-badge");
@@ -1014,6 +1025,7 @@ impl MiniTerminalCard {
             // guess heals fast, then at most every 30s.
             oc_recheck_at: Rc::new(RefCell::new(std::time::Instant::now())),
             status_badge,
+            git_badge,
             refresh_in_flight: Rc::new(Cell::new(false)),
             preview_label,
             compact,
@@ -2054,6 +2066,7 @@ impl MiniTerminalCard {
         };
 
         let status_badge = self.status_badge.downgrade();
+        let git_badge = self.git_badge.downgrade();
         let compact_status = self.compact.status.downgrade();
         let preview_label = self.preview_label.downgrade();
         let meta_label = self.meta_label.downgrade();
@@ -2097,7 +2110,7 @@ impl MiniTerminalCard {
             need_resolve,
         };
         let apply = Box::new(move |update: Option<crate::card_status::CardUpdate>| {
-            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice, scrolled_back }) = update else {
+            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice, scrolled_back, git }) = update else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -2109,6 +2122,9 @@ impl MiniTerminalCard {
             }
             if let Some(scrolled_back) = scrolled_back {
                 jump.listed(scrolled_back);
+            }
+            if let Some(label) = git_badge.upgrade() {
+                apply_git_badge(&label, git.as_ref());
             }
 
             if let (Some(label), Some(meta)) = (preview_label.upgrade(), meta_label.upgrade()) {
@@ -2268,6 +2284,32 @@ fn format_card_title(prefix: &str, last_prompt: Option<&str>) -> String {
     match last_prompt {
         Some(prompt) if !prompt.trim().is_empty() => format!("{prefix} • {prompt}"),
         _ => prefix.to_string(),
+    }
+}
+
+/// Longest branch shown in a card's header before it is ellipsized.
+const GIT_BADGE_MAX_CHARS: i32 = 22;
+
+/// Show the checkout's branch and changed-file count, or hide the badge
+/// outside a git repository. Touches the label only when something changed.
+fn apply_git_badge(label: &Label, git: Option<&(String, crate::git_worktree::Badge)>) {
+    let Some((dir, badge)) = git else {
+        if label.is_visible() {
+            label.set_visible(false);
+        }
+        return;
+    };
+    let text = badge.label();
+    if label.label().as_str() != text {
+        label.set_label(&text);
+        label.set_tooltip_text(Some(&badge.tooltip(dir)));
+    }
+    let dirty = badge.changed > 0;
+    if label.has_css_class("git-dirty") != dirty {
+        if dirty { label.add_css_class("git-dirty") } else { label.remove_css_class("git-dirty") }
+    }
+    if !label.is_visible() {
+        label.set_visible(true);
     }
 }
 

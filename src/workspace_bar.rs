@@ -28,7 +28,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick, GestureDrag, Label, Orientation,
-    Popover, PositionType, PropagationPhase,
+    Popover, PositionType, PropagationPhase, ToggleButton,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -93,6 +93,29 @@ fn append_resize_handle(row: &GtkBox, entry: &Entry) {
     });
     handle.add_controller(drag);
     row.append(&handle);
+}
+
+/// ⑂: start each new harness in its own git worktree (see `git_worktree`).
+/// Lit while on; the choice is saved with the rest of the state.
+fn worktree_toggle(state: &Rc<RefCell<AppState>>) -> ToggleButton {
+    let toggle = ToggleButton::with_label("⑂");
+    toggle.add_css_class("ws-menu-btn");
+    toggle.add_css_class("ws-worktree-btn");
+    toggle.set_valign(Align::Center);
+    toggle.set_focus_on_click(false);
+    toggle.set_tooltip_text(Some(
+        "New harnesses in a git repository start in their own worktree on a new branch",
+    ));
+    toggle.set_active(state.borrow().new_worktree);
+    let state = Rc::clone(state);
+    toggle.connect_toggled(move |toggle| {
+        let on = toggle.is_active();
+        if state.borrow().new_worktree != on {
+            state.borrow_mut().new_worktree = on;
+            crate::state::save_state_async(state.borrow().clone());
+        }
+    });
+    toggle
 }
 
 /// The top bar field and the history popover it owns.
@@ -423,6 +446,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
     menu_btn.set_valign(Align::Center);
     menu_btn.set_tooltip_text(Some("Folders used before"));
     row.append(&menu_btn);
+    row.append(&worktree_toggle(&state));
     append_resize_handle(&row, &entry);
     bar.append(&row);
 
@@ -1517,6 +1541,14 @@ mod tests {
         assert_eq!(entry.width_chars(), FIELD_MIN_CHARS);
         assert_eq!(entry.max_width_chars(), FIELD_MAX_CHARS);
         assert_eq!(count_class(bar.widget.upcast_ref(), "ws-resize-handle"), 1);
+        // ⑂ sits beside ▾, off until the user turns worktrees on. Not
+        // toggled here: that would save the state file.
+        let worktree = find_button(bar.widget.upcast_ref(), "ws-worktree-btn")
+            .and_then(|button| button.downcast::<ToggleButton>().ok())
+            .expect("the worktree toggle must exist");
+        assert!(!worktree.is_active());
+        assert_eq!(worktree.label().as_deref(), Some("⑂"));
+        assert!(worktree.has_css_class("ws-menu-btn"), "styled like ▾");
 
         // The ▾ list has one row per remembered folder, each with its own ✕.
         rebuild_recent(&bar.popover, &state, &entry, Rc::clone(&persist), None);

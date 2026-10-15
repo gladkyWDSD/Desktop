@@ -3,6 +3,8 @@ mod brand;
 mod assets;
 mod asset_history;
 mod completion;
+mod finish_notify;
+mod git_worktree;
 mod custom_harness;
 mod prompt_image;
 mod prompt_attachments;
@@ -546,6 +548,7 @@ fn main() {
 fn run_daemon(start_visible: bool) {
     let initial_state = state::load_state();
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
+    finish_notify::set_enabled(initial_state.finish_notifications);
     // Before any card is restored: restores resolve through these too.
     launch_args::install(&initial_state.harness_args);
     let _ = gtk4::init();
@@ -633,6 +636,20 @@ fn run_daemon(start_visible: bool) {
         });
     }
 
+    // A harness that finishes while the overlay is hidden says so; the
+    // notification's Show opens the overlay on that card.
+    {
+        let ctx_finish = Rc::clone(&context);
+        let app_finish = app.clone();
+        finish_notify::start(move |session| {
+            if show_window(&ctx_finish, &app_finish) {
+                if let Some(win) = live_window(&ctx_finish) {
+                    win.select_terminal(&session);
+                }
+            }
+        });
+    }
+
     // The channel's waker schedules this future on GTK as soon as a command
     // arrives. No polling timer, idle CPU use, or extra wake-pipe descriptors.
     let ctx_ipc = Rc::clone(&context);
@@ -680,6 +697,7 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     if let Some(win) = live_window(ctx) {
         win.show_again();
         ctx.borrow_mut().shown = true;
+        finish_notify::set_overlay_shown(true);
         return true;
     }
 
@@ -692,6 +710,7 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     win.start_slide_in();
     ctx.borrow_mut().window = Some(win);
     ctx.borrow_mut().shown = true;
+    finish_notify::set_overlay_shown(true);
     true
 }
 
@@ -739,6 +758,7 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
         None => return,
     };
     ctx.borrow_mut().shown = false;
+    finish_notify::set_overlay_shown(false);
     // Slide out, then unmap: the widget tree, the VTE terminals and their tmux
     // attach clients stay alive, so the next show is instant. The token makes a
     // show that lands during the animation win over this unmap.

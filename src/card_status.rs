@@ -34,6 +34,18 @@ pub struct CardUpdate {
     /// The pane is scrolled back in tmux's copy mode (`PaneRow::in_mode`), so
     /// the card offers to jump back to the newest output. `None`: unknown.
     pub scrolled_back: Option<bool>,
+    /// Branch and changed files of the checkout the pane runs in, with that
+    /// folder (the live pane cwd). `None` outside a git repository.
+    pub git: Option<(String, crate::git_worktree::Badge)>,
+}
+
+/// The header's ⑂ badge for the pane's live folder (`SessionStatus::cwd`).
+fn git_badge(status: &SessionStatus) -> Option<(String, crate::git_worktree::Badge)> {
+    if status.status == "EXITED" {
+        return None;
+    }
+    let badge = crate::git_worktree::badge(&status.cwd)?;
+    Some((status.cwd.clone(), badge))
 }
 
 /// An OpenClaw card whose gateway does not load the SUPER DESKTOP plugin never
@@ -141,7 +153,8 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let prompt = card_prompt(agent, row, metadata.as_ref(), oc_id.as_deref());
     let notice = setup_notice(metadata.as_ref(), crate::harness_metadata::openclaw_plugin);
     let scrolled_back = Some(row.is_some_and(|row| row.in_mode));
-    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back }
+    let git = git_badge(&status);
+    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back, git }
 }
 
 fn preview_text(screen: Option<&str>, status: &SessionStatus, lines: usize) -> String {
@@ -266,7 +279,8 @@ fn legacy(request: &CardRequest) -> CardUpdate {
     );
     // Without the inventory the card keeps its button as it is; the next
     // refresh or scroll corrects it.
-    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back: None }
+    let git = git_badge(&status);
+    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back: None, git }
 }
 
 #[cfg(test)]
